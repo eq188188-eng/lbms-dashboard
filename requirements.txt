@@ -6,3 +6,8 @@ yfinance
 pandas
 numpy
 streamlit
+streamlit
+pandas
+matplotlib
+
+

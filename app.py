@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import streamlit as st  
+import streamlit as st
 import os
 
 # 基本網頁排版設定
@@ -76,7 +76,7 @@ total_days = (df.index[-1] - df.index[0]).days
 years = total_days / 365.25 if total_days > 0 else 1.0
 
 # ==============================================================================
-# 3. 雙策略動態回測引擎 (修復每日資產滾動連動)
+# 3. 雙策略動態回測引擎
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -100,31 +100,27 @@ def run_local_backtest(ma_column):
         c_ndfi = float(ndfi_vals[i])
         c_pcr = float(pcr_vals[i])
         
-        # 1. 如果持有部位，先檢查是否符合「出場」條件
         if in_position:
-            if c_taiex < c_ma: # 跌破均線防守
+            if c_taiex < c_ma:
                 cash = (etf_shares * c_etf) * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🚨 跌破 {ma_column} ({c_ma:.1f})，全數強制清倉避險！")
-            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger: # 貪婪過熱出場
+            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger:
                 cash = (etf_shares * c_etf) * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪 (NDFI:{c_ndfi})，全數獲利平倉！")
-                
-        # 2. 如果是空手狀態，檢查是否符合「進場」條件
         else:
             if c_taiex >= c_ma:
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
                     current_total = cash  
-                    buy_budget = current_total * 0.50 # 50% 資金進場
+                    buy_budget = current_total * 0.50
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
                     cash = current_total - buy_budget
                     in_position = True
                     logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底 (NDFI:{c_ndfi})，50% 資金以價格 {c_etf} 進場！")
                     
-        # 3. 每日結算總資產 = 現金餘額 + 當前持股市值
         current_portfolio_value = cash + (etf_shares * c_etf)
         portfolio_values.append(current_portfolio_value)
         

@@ -9,13 +9,13 @@ from datetime import datetime
 # 1. 頁面基本配置
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="LBMS 流動性與泡沫預警系統",
+    page_title="LBMS 流動性與泡沫預警系統 (含 IV/VIX)",
     page_icon="📈",
     layout="wide"
 )
 
-st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (含加碼點與回測)")
-st.caption("透過微觀結構、波動率及信用利差，客觀監測資產風險並自動尋找風控與加碼買點。")
+st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (含 IV、VIX 與加碼回測)")
+st.caption("透過微觀結構、歷史波動率、隱含波動率(IV)、VIX恐慌指數及信用利差，全方位客觀監測市場泡沫與流動性危機。")
 
 # ---------------------------------------------------------
 # 2. 數據抓取與預處理
@@ -28,24 +28,27 @@ def load_data(ticker):
     return df
 
 st.sidebar.header("⚙️ 系統參數設定")
-target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="SOXL")
+target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="TQQQ")
 hyg_symbol = "HYG"
 tlt_symbol = "TLT"
+vix_symbol = "^VIX"
 
-with st.spinner(f"正在讀取 {target_symbol} 與歷史市場數據..."):
+with st.spinner(f"正在讀取 {target_symbol}、HYG、TLT 與 VIX 市場數據..."):
     df_target = load_data(target_symbol)
     df_hyg = load_data(hyg_symbol)
     df_tlt = load_data(tlt_symbol)
+    df_vix = load_data(vix_symbol)
 
 if df_target.empty:
     st.error(f"無法取得標的 '{target_symbol}' 數據，請確認代碼是否正確。")
     st.stop()
 
 # 數據時間對齊與空值清理
-common_index = df_target.index.intersection(df_hyg.index).intersection(df_tlt.index)
+common_index = df_target.index.intersection(df_hyg.index).intersection(df_tlt.index).intersection(df_vix.index)
 df_t = df_target.loc[common_index].copy()
 df_h = df_hyg.loc[common_index].copy()
 df_l = df_tlt.loc[common_index].copy()
+df_v = df_vix.loc[common_index].copy()
 
 # 基礎指標計算
 df_t['ATH'] = df_t['High'].cummax()
@@ -54,25 +57,39 @@ df_t['Returns'] = df_t['Close'].pct_change()
 df_t['Vol_20d'] = df_t['Returns'].rolling(window=20).std() * (252 ** 0.5)
 df_t['MA20'] = df_t['Close'].rolling(window=20).mean()
 
+# 信用利差 Proxy
 credit_ratio = df_h['Close'] / df_l['Close']
 credit_mavg = credit_ratio.rolling(20).mean()
 credit_threshold = credit_mavg * 0.97
 cond_credit = credit_ratio < credit_threshold
 
+# VIX 指標邏輯：當 VIX 突破 60 日均線的 1.2 倍或絕對值高於 25 視為恐慌
+vix_close = df_v['Close']
+vix_mavg = vix_close.rolling(60).mean()
+cond_vix = (vix_close > vix_mavg * 1.2) | (vix_close > 25.0)
+
 # ---------------------------------------------------------
-# 3. 回測計算與加碼點判定核心函數
+# 3. 回測計算與加碼點判定核心函數 (擴充至 4 維度評分)
 # ---------------------------------------------------------
 def run_backtest(df, b_min, b_max, v_quant):
     vol_thresh = df['Vol_20d'].expanding().quantile(v_quant)
     cond_b = (df['ATH_Ratio'] >= b_min) & (df['ATH_Ratio'] <= b_max)
-    cond_v = df['Vol_20d'] > vol_thresh
+    cond_vol = df['Vol_20d'] > vol_thresh
     
-    score = cond_b.astype(int) + cond_v.astype(int) + cond_credit.loc[df.index].astype(int)
+    # 綜合評分：B浪區間 + 歷史波動率 + 信用利差 + VIX恐慌
+    score = (
+        cond_b.astype(int) + 
+        cond_vol.astype(int) + 
+        cond_credit.loc[df.index].astype(int) + 
+        cond_vix.loc[df.index].astype(int)
+    )
     
     prev_score = score.shift(1).fillna(0)
+    # 加碼訊號：過去有警報(>=1) 轉為 安全(0) 且 價格站上 20 日均線
     add_signal = (prev_score >= 1) & (score == 0) & (df['Close'] > df['MA20'])
     
-    position = np.where(score >= 3, 0.0, np.where(score == 2, 0.5, 1.0))
+    # 動態倉位控制 (4分滿分防禦)
+    position = np.where(score >= 3, 0.0, np.where(score == 2, 0.3, np.where(score == 1, 0.7, 1.0)))
     pos_series = pd.Series(position, index=df.index).shift(1).fillna(1.0)
     
     strat_ret = df['Returns'] * pos_series
@@ -143,22 +160,26 @@ with tab1:
     vol_thresh_now = float(vol_threshold_hist.iloc[-1])
     current_credit = float(credit_ratio.loc[df_clean.index[-1]])
     thresh_credit_now = float(credit_threshold.loc[df_clean.index[-1]])
+    current_vix = float(vix_close.loc[df_clean.index[-1]])
+    vix_mavg_now = float(vix_mavg.loc[df_clean.index[-1]])
     is_add_today = bool(df_clean['Add_Signal'].iloc[-1])
 
     triggers = []
     if b_wave_min <= ath_ratio <= b_wave_max:
         triggers.append(f"進入類高點危險區 (當前為 ATH 的 {ath_ratio*100:.1f}%)")
     if current_vol > vol_thresh_now:
-        triggers.append(f"波動率爆表 (當前 {current_vol*100:.1f}% > 門檻 {vol_thresh_now*100:.1f}%)")
+        triggers.append(f"歷史波動率爆表 (當前 {current_vol*100:.1f}%)")
     if current_credit < thresh_credit_now:
         triggers.append("信用利差惡化 (高收益債相對強度偏弱)")
+    if current_vix > vix_mavg_now * 1.2 or current_vix > 25.0:
+        triggers.append(f"VIX 恐慌指數飆升 (當前 VIX: {current_vix:.2f})")
 
     trigger_count = len(triggers)
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("當前價格", f"${current_price:.2f}", f"ATH: ${ath_price:.2f}")
     col2.metric("相對於 ATH 比例", f"{ath_ratio*100:.1f}%")
-    col3.metric("20日年化波動率", f"{current_vol*100:.1f}%", f"門檻: {vol_thresh_now*100:.1f}%", delta_color="inverse")
+    col3.metric("VIX 恐慌指數", f"{current_vix:.2f}", f"均線: {vix_mavg_now:.2f}", delta_color="inverse")
     col4.metric("信用利差 Proxy", f"{current_credit:.2f}", f"門檻: {thresh_credit_now:.2f}", delta_color="normal")
 
     st.divider()
@@ -166,13 +187,13 @@ with tab1:
     if is_add_today:
         st.info("🔵 **當前訊號：安全加碼點！ (Re-entry / Add Signal)**\n\n風險警報解除且站穩 20 日均線，建議分批加碼/補回滿倉部位。")
     elif trigger_count == 0:
-        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n市場結構與流動性正常，可維持原持倉。")
+        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n市場結構與流動性正常，VIX 與信用指標平穩。")
     elif trigger_count == 1:
         st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，取消追高買單。")
     elif trigger_count == 2:
         st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿部位。")
     else:
-        st.error("🔴 **當前燈號：紅燈 (極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
+        st.error("🔴 **當前燈號：紅燈 (極限離場/流動性危機)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
 
     st.subheader(f"📊 {target_symbol} 近期價格走勢、警戒區間與加碼點")
     
@@ -200,36 +221,8 @@ with tab1:
 # TAB 2: 歷史回測分析
 # =========================================================
 with tab2:
-    st.header(f"📈 {target_symbol} 風控與加碼策略歷史回測模擬")
-    st.caption("模擬規則：綠燈 100% 持倉；橘燈 50% 減碼；紅燈 100% 清倉；轉綠燈且站上 MA20 觸發藍燈加碼。")
+    st.header(f"📈 {target_symbol} 加入 VIX/信用利差之風控策略回測")
+    st.caption("模擬規則：綜合評分防禦（綠燈滿倉、黃/橘燈動態減碼、紅燈清倉），並於風險解除且站上 MA20 時觸發藍燈加碼。")
 
-    position = np.where(df_clean['Signal'] >= 3, 0.0, np.where(df_clean['Signal'] == 2, 0.5, 1.0))
-    position_series = pd.Series(position, index=df_clean.index).shift(1).fillna(1.0)
-    strategy_returns = df_clean['Returns'] * position_series
-    
-    cum_bh = (1 + df_clean['Returns'].fillna(0)).cumprod()
-    cum_strat = (1 + strategy_returns.fillna(0)).cumprod()
-    
-    mdd_bh = ((cum_bh / cum_bh.cummax()) - 1).min()
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("買入持有 (B&H) 累積報酬", f"{(cum_bh.iloc[-1]-1)*100:.1f}%")
-    c2.metric("LBMS 避險策略 累積報酬", f"{(cum_strat.iloc[-1]-1)*100:.1f}%")
-    c3.metric("B&H 最大回撤 (MDD)", f"{mdd_bh*100:.1f}%", delta_color="inverse")
-    c4.metric("LBMS 策略最大回撤 (MDD)", f"{mdd_strat*100:.1f}%", f"改善 {abs(mdd_bh-mdd_strat)*100:.1f}%", delta_color="normal")
-    
-    st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
-    fig_backtest = go.Figure()
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
-    fig_backtest.update_layout(template="plotly_dark", height=450, yaxis_type="log", title="資產對數淨值成長曲線")
-    st.plotly_chart(fig_backtest, use_container_width=True)
-
-    st.subheader("🔵 歷史安全加碼訊號紀錄")
-    add_df = df_clean[df_clean['Add_Signal']].copy()
-    if not add_df.empty:
-        add_df['ATH%'] = (add_df['ATH_Ratio'] * 100).round(1).astype(str) + '%'
-        add_df['波動率%'] = (add_df['Vol_20d'] * 100).round(1).astype(str) + '%'
-        st.dataframe(add_df[['Close', 'MA20', 'ATH%', '波動率%']].sort_index(ascending=False), use_container_width=True)
-    else:
-        st.info("歷史區間內未出現加碼訊號。")
+    position = np.where(df_clean['Signal'] >= 3, 0.0, np.where(df_clean['Signal'] == 2, 0.3, np.where(df_clean['Signal'] == 1, 0.7, 1.0)))
+    position_series

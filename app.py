@@ -28,7 +28,7 @@ ndfi_sell_trigger = st.sidebar.slider("NDFI 突破此數值 (市場過熱)", min
 pcr_sell_trigger = st.sidebar.slider("5日 P/C Ratio 跌破此數值 (散戶瘋狂)", min_value=0.5, max_value=0.7, value=0.6, step=0.05)
 
 # ==============================================================================
-# 2. 安全讀取與嚴格檢查本地 CSV 檔案
+# 2. 超強容錯與自動清洗數據引擎
 # ==============================================================================
 csv_filename = "data.csv"
 
@@ -39,31 +39,58 @@ if not os.path.exists(csv_filename):
 @st.cache_data
 def load_and_validate_data():
     try:
-        raw_df = pd.read_csv(csv_filename)
+        # 使用 Python 引擎與自動略過錯誤行，防止 tokenizing 崩潰
+        raw_df = pd.read_csv(csv_filename, on_bad_lines='skip', engine='python')
     except Exception as e:
-        st.error(f"❌ 讀取 CSV 發生錯誤: {e}")
-        return None
+        # 如果預設逗號讀取失敗，嘗試用無敵萬能的正規表達式逐行解析
+        try:
+            data_rows = []
+            with open(csv_filename, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            header = [h.strip() for h in lines[0].replace('"', '').split(',')]
+            for line in lines[1:]:
+                parts = [p.strip() for p in line.replace('"', '').split(',') if p.strip()]
+                if len(parts) >= 5:
+                    data_rows.append(parts[:5])
+            raw_df = pd.DataFrame(data_rows, columns=header[:5])
+        except Exception as ex:
+            st.error(f"❌ 讀取 CSV 發生嚴重錯誤: {ex}")
+            return None
+
+    # 移除欄位名稱的 BOM 與多餘空格
+    raw_df.columns = raw_df.columns.astype(str).str.strip().str.replace('\ufeff', '')
+    
+    # 重新對應欄位名稱（確保大小寫或輕微誤差也能對到）
+    col_mapping = {}
+    for col in raw_df.columns:
+        c_lower = col.lower()
+        if 'date' in c_lower: col_mapping[col] = 'Date'
+        elif 'taiex' in c_lower: col_mapping[col] = 'TAIEX'
+        elif '00631l' in c_lower: col_mapping[col] = '00631L'
+        elif 'ndfi' in c_lower: col_mapping[col] = 'NDFI'
+        elif 'pcr' in c_lower: col_mapping[col] = 'PCR_5MA'
         
-    raw_df.columns = raw_df.columns.str.strip()
+    raw_df = raw_df.rename(columns=col_mapping)
     
     required_cols = ['Date', 'TAIEX', '00631L', 'NDFI', 'PCR_5MA']
     for col in required_cols:
         if col not in raw_df.columns:
-            st.error(f"❌ 您的 CSV 缺少必要欄位: `{col}`。現有欄位為: {list(raw_df.columns)}")
+            st.error(f"❌ 您的 CSV 缺少必要欄位: `{col}`。目前偵測到的欄位為: {list(raw_df.columns)}")
             return None
 
-    # 強制使用 mixed 格式解析日期，避免日期格式不統一導致整欄變 NaT
+    # 強制轉換日期
     raw_df['Date'] = pd.to_datetime(raw_df['Date'], format='mixed', errors='coerce')
     raw_df = raw_df.dropna(subset=['Date'])
     
     if raw_df.empty:
-        st.error("❌ 錯誤：'Date' 欄位經過轉換後全部變成空值，請檢查您的 CSV 日期格式（建議如 YYYY-MM-DD）。")
+        st.error("❌ 錯誤：'Date' 欄位經過轉換後全部為空，請檢查日期格式。")
         return None
         
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
+    # 清洗數值（自動去除千分位逗號與字串空白）
     for col in ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']:
-        raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
+        raw_df[col] = pd.to_numeric(raw_df[col].astype(str).str.replace(',', '').str.strip(), errors='coerce')
         
     raw_df = raw_df.ffill().bfill()
     

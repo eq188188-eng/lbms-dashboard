@@ -107,3 +107,11 @@ if st.sidebar.button("⚡ 尋找該標的歷史最佳參數"):
                         best_score_metric = score_metric
                         best_ret = ret
                         best_mdd = mdd
+                        best_combo = (round(b_min, 2), round(b_max, 2), round(v_q, 2))
+        
+        st.session_state["best_params"] = {
+            "b_min": best_combo[0],
+            "b_max": best_combo[1],
+            "v_quant": best_combo[2]
+        }
+        st.sidebar.success(f"已套用最佳參數！\nB浪: {int(best_combo[0]*100)}%~{int(best_combo[1]*100)}%, VaR: {int(best_

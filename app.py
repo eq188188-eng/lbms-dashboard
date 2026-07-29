@@ -133,4 +133,52 @@ with tab1:
     st.divider()
 
     if is_add_today:
-        st.info("🔵 **當前訊號：籌碼危機解除與均線支撐加碼
+        st.info("🔵 **當前訊號：籌碼危機解除與均線支撐加碼點！**\n\n法人與融資籌碼壓力已過，且價格回測至均線支撐帶，建議分批低接。")
+    elif trigger_count == 0:
+        st.success("🟢 **當前燈號：綠燈 (籌碼結構安全)**\n\n三大法人與期權散戶結構健康，可維持滿倉。")
+    elif trigger_count == 1:
+        st.warning("🟡 **當前燈號：黃燈 (籌碼鬆動警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止融資開槓桿，提高現金。")
+    elif trigger_count == 2:
+        st.error("🟠 **當前燈號：橘燈 (籌碼惡化減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿。")
+    else:
+        st.error("🔴 **當前燈號：紅燈 (流動性與融資斷頭危機/清倉)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉避險。")
+
+    st.subheader(f"📊 {target_symbol} 近期價格與均線防守區")
+    recent_df = df_t.iloc[-500:]
+    add_pts = recent_df[recent_df['Add_Signal']]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=recent_df.index, y=recent_df['Close'], name="收盤價", line=dict(color='skyblue', width=2)))
+    fig.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA20'], name="MA20", line=dict(color='yellow', width=1, dash='dot')))
+    fig.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA60'], name="MA60", line=dict(color='orange', width=1)))
+    fig.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA240'], name="MA240", line=dict(color='magenta', width=1.5)))
+    
+    if not add_pts.empty:
+        fig.add_trace(go.Scatter(
+            x=add_pts.index, y=add_pts['Close'],
+            mode='markers',
+            name='🔵 籌碼解除與均線低接點',
+            marker=dict(symbol='triangle-up', size=12, color='cyan')
+        ))
+
+    fig.update_layout(template="plotly_dark", height=450, margin=dict(l=20, r=20, t=30, b=20))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    st.header("📈 籌碼策略歷史回測效能")
+    cum_bh = (1 + df_t['Returns'].fillna(0)).cumprod()
+    
+    position = np.where(df_t['Signal'] >= 3, 0.0, np.where(df_t['Signal'] == 2, 0.3, np.where(df_t['Signal'] == 1, 0.7, 1.0)))
+    pos_ser = pd.Series(position, index=df_t.index).shift(1).fillna(1.0)
+    strat_ret = df_t['Returns'] * pos_ser
+    cum_strat = (1 + strat_ret.fillna(0)).cumprod()
+    
+    c1, c2 = st.columns(2)
+    c1.metric("買入持有 (B&H) 報酬率", f"{(cum_bh.iloc[-1]-1)*100:.1f}%")
+    c2.metric("台股籌碼策略報酬率", f"{(cum_strat.iloc[-1]-1)*100:.1f}%")
+    
+    fig_b = go.Figure()
+    fig_b.add_trace(go.Scatter(x=df_t.index, y=cum_bh, name="買入持有", line=dict(color='gray', width=1.5)))
+    fig_b.add_trace(go.Scatter(x=df_t.index, y=cum_strat, name="台股籌碼風控策略", line=dict(color='green', width=2)))
+    fig_b.update_layout(template="plotly_dark", height=400, yaxis_type="log", title="對數淨值曲線")
+    st.plotly_chart(fig_b, use_container_width=True)

@@ -220,4 +220,16 @@ with tab2:
     
     st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
     fig_backtest = go.Figure()
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
+    fig_backtest.update_layout(template="plotly_dark", height=450, yaxis_type="log", title="資產對數淨值成長曲線")
+    st.plotly_chart(fig_backtest, use_container_width=True)
+
+    st.subheader("🔵 歷史安全加碼訊號紀錄")
+    add_df = df_clean[df_clean['Add_Signal']].copy()
+    if not add_df.empty:
+        add_df['ATH%'] = (add_df['ATH_Ratio'] * 100).round(1).astype(str) + '%'
+        add_df['波動率%'] = (add_df['Vol_20d'] * 100).round(1).astype(str) + '%'
+        st.dataframe(add_df[['Close', 'MA20', 'ATH%', '波動率%']].sort_index(ascending=False), use_container_width=True)
+    else:
+        st.info("歷史區間內未出現加碼訊號。")

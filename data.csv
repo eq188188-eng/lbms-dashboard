@@ -1,5 +1,17 @@
-Date,TAIEX,00631L,NDFI,PCR_5MA
-2018-01-02,10642.86,52.15,65.4,0.72
-2018-01-03,10710.73,53.00,68.1,0.70
-...
-2024-03-05,19386.92,148.50,12.5,1.12
+@st.cache_data
+def load_local_data():
+  import os
+
+  if not os.path.exists("data.csv"):
+    return pd.DataFrame(columns=["Date", "TAIEX", "00631L", "NDFI", "PCR_5MA"])
+
+  try:
+    raw_df = pd.read_csv("data.csv")
+    # 將無法轉換的非日期格式（如 ... 或文字）自動轉為 NaT，避免程式崩潰
+    if "Date" in raw_df.columns:
+      raw_df["Date"] = pd.to_datetime(raw_df["Date"], errors="coerce")
+      raw_df = raw_df.dropna(subset=["Date"])  # 過濾掉日期無效的行
+    return raw_df
+  except Exception as e:
+    st.error(f"讀取 data.csv 發生錯誤: {e}")
+    return pd.DataFrame()

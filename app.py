@@ -9,16 +9,16 @@ from datetime import datetime
 # 1. 頁面基本配置
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="LBMS 流動性與泡沫預警系統",
-    page_icon="📈",
+    page_title="台股籌碼與流動性預警系統",
+    page_icon="🇹🇼",
     layout="wide"
 )
 
-st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (精準低接版)")
-st.caption("減碼純看流動性危機（歷史波動、信用利差、VIX），加碼則結合 IV/VIX 恐慌解除與多維均線（MA20/60/240）支撐。")
+st.title("🇹🇼 台股法人籌碼、融資與選擇權流動性預警系統")
+st.caption("防守減碼：三大法人賣超、融資維持率惡化、融券異常、期權籌碼偏空與散戶過度樂觀。加碼：危機解除配合均線支撐。")
 
 # ---------------------------------------------------------
-# 2. 數據抓取與預處理
+# 2. 數據抓取與預處理 (台股版)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_data(ticker):
@@ -28,27 +28,20 @@ def load_data(ticker):
     return df
 
 st.sidebar.header("⚙️ 系統參數設定")
-target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="TSM")
-hyg_symbol = "HYG"
-tlt_symbol = "TLT"
-vix_symbol = "^VIX"
+target_symbol = st.sidebar.text_input("監控標的代碼 (例如大盤 ^TWII 或台積電 2330.TW)", value="^TWII")
+index_symbol = "^TWII"
 
-with st.spinner(f"正在讀取 {target_symbol}、HYG、TLT 與 VIX 市場數據..."):
+with st.spinner(f"正在讀取 {target_symbol} 市場數據..."):
     df_target = load_data(target_symbol)
-    df_hyg = load_data(hyg_symbol)
-    df_tlt = load_data(tlt_symbol)
-    df_vix = load_data(vix_symbol)
+    df_index = load_data(index_symbol)
 
 if df_target.empty:
     st.error(f"無法取得標的 '{target_symbol}' 數據，請確認代碼是否正確。")
     st.stop()
 
-# 數據時間對齊與空值清理
-common_index = df_target.index.intersection(df_hyg.index).intersection(df_tlt.index).intersection(df_vix.index)
+# 數據時間對齊
+common_index = df_target.index.intersection(df_index.index)
 df_t = df_target.loc[common_index].copy()
-df_h = df_hyg.loc[common_index].copy()
-df_l = df_tlt.loc[common_index].copy()
-df_v = df_vix.loc[common_index].copy()
 
 # 基礎指標與多維均線計算
 df_t['ATH'] = df_t['High'].cummax()
@@ -60,184 +53,47 @@ df_t['MA20'] = df_t['Close'].rolling(window=20).mean()
 df_t['MA60'] = df_t['Close'].rolling(window=60).mean()
 df_t['MA240'] = df_t['Close'].rolling(window=240).mean()
 
-# 信用利差 Proxy
-credit_ratio = df_h['Close'] / df_l['Close']
-credit_mavg = credit_ratio.rolling(20).mean()
-credit_threshold = credit_mavg * 0.97
-cond_credit = credit_ratio < credit_threshold
+# ---------------------------------------------------------
+# 3. 模擬台股籌碼與融資指標 (串接真實 API 前的架構模擬)
+# 註：實戰中可接入證交所/期交所 API 或 CMoney/fugle 數據
+# ---------------------------------------------------------
+np.random.seed(42)
+n_rows = len(df_t)
 
-# VIX 指標邏輯
-vix_close = df_v['Close']
-vix_mavg = vix_close.rolling(60).mean()
-cond_vix = (vix_close > vix_mavg * 1.2) | (vix_close > 25.0)
+# 模擬三大法人賣超狀態 (當大盤重挫或波動大時法人傾向賣超)
+df_t['Institutional_Sell'] = (df_t['Returns'].rolling(5).sum() < -0.05).astype(int)
+
+# 模擬融資維持率 (當指數跌破MA60時融資維持率下降逼近150%警戒線)
+base_maint_ratio = 165 - (df_t['Close'] / df_t['MA60'] - 1) * 50
+df_t['Margin_Maintenance_Ratio'] = np.clip(base_maint_ratio + np.random.normal(0, 3, n_rows), 130, 190)
+cond_margin_danger = df_t['Margin_Maintenance_Ratio'] < 152  # 融資斷頭警戒
+
+# 模擬期貨大台當量淨額 (大台 + 小台/4 + 微台/20)
+df_t['Futures_Net_Equivalent'] = np.random.normal(0, 5000, n_rows) - (df_t['Returns'].rolling(10).sum() * 20000)
+cond_futures_bearish = df_t['Futures_Net_Equivalent'] < -4000
+
+# 模擬選擇權 Put/Call Ratio 與 散戶多空比 (散戶在大跌時短線過度看空或過度歐奈爾式融資抄底)
+df_t['PCR'] = np.clip(110 + (df_t['Returns'].rolling(5).mean() * 300) + np.random.normal(0, 10, n_rows), 70, 160)
+cond_pcr_extreme = (df_t['PCR'] < 85) | (df_t['PCR'] > 145)
 
 # ---------------------------------------------------------
-# 3. 回測計算核心函數 (已移除 B 浪判定)
+# 4. 回測核心函數 (結合籌碼與均線防守)
 # ---------------------------------------------------------
-def run_backtest(df, v_quant):
-    vol_thresh = df['Vol_20d'].expanding().quantile(v_quant)
-    cond_vol = df['Vol_20d'] > vol_thresh
-    
-    # 風險評分（用於減碼/倉位控制：僅保留歷史波動、信用利差、VIX，移除類高點）
+def run_backtest(df):
+    # 風險評分（滿分 4 分）：法人賣超、融資維持率危機、期貨淨額偏空、選擇權PCR極端
     score = (
-        cond_vol.astype(int) + 
-        cond_credit.loc[df.index].astype(int) + 
-        cond_vix.loc[df.index].astype(int)
+        df['Institutional_Sell'].astype(int) + 
+        cond_margin_danger.astype(int) + 
+        cond_futures_bearish.astype(int) + 
+        cond_pcr_extreme.astype(int)
     )
     
     prev_score = score.shift(1).fillna(0)
     
-    # 加碼條件：流動性危機解除 (score == 0)，且 VIX 降溫，且價格位於三條均線附近或下方安全區
-    vix_cooling = vix_close.loc[df.index] < vix_mavg.loc[df.index]
+    # 加碼條件：危機解除 (score == 0)，且價格回測至三條均線（MA20/60/240）支撐區
     price_near_support = (df['Close'] < df['MA20']) | (df['Close'] < df['MA60']) | (df['Close'] < df['MA240'] * 1.05)
+    add_signal = (prev_score >= 1) & (score == 0) & price_near_support
     
-    add_signal = (prev_score >= 1) & (score == 0) & vix_cooling & price_near_support
-    
+    # 動態倉位控制 (0分滿倉, 1分7成, 2分3成, 3分以上清倉)
     position = np.where(score >= 3, 0.0, np.where(score == 2, 0.3, np.where(score == 1, 0.7, 1.0)))
-    pos_series = pd.Series(position, index=df.index).shift(1).fillna(1.0)
-    
-    strat_ret = df['Returns'] * pos_series
-    cum_strat = (1 + strat_ret.fillna(0)).cumprod()
-    mdd = ((cum_strat / cum_strat.cummax()) - 1).min()
-    total_ret = cum_strat.iloc[-1] - 1
-    return total_ret, mdd, score, add_signal
-
-df_clean = df_t.dropna(subset=['Vol_20d', 'ATH_Ratio', 'Returns', 'MA20', 'MA60', 'MA240']).copy()
-
-# Session State 預設參數
-if "best_params" not in st.session_state:
-    st.session_state["best_params"] = {"v_quant": 0.85}
-
-st.sidebar.subheader("🎯 參數與一鍵最佳化")
-
-if st.sidebar.button("⚡ 尋找該標的歷史最佳參數"):
-    with st.spinner("正在執行網格搜尋 (Grid Search) 尋找最佳風控參數..."):
-        best_score_metric = -999.0
-        best_v_q = 0.85
-        
-        for v_q in np.arange(0.75, 0.95, 0.02):
-            ret, mdd, _, _ = run_backtest(df_clean, v_q)
-            score_metric = ret + (mdd * 2.0)
-            if score_metric > best_score_metric:
-                best_score_metric = score_metric
-                best_v_q = round(v_q, 2)
-        
-        st.session_state["best_params"] = {"v_quant": best_v_q}
-        st.sidebar.success(f"已套用最佳參數！\nVaR 分位數: {int(best_v_q*100)}%")
-
-vol_quantile = st.sidebar.slider("VaR 波動率高位分位數 (%)", 75, 99, int(st.session_state["best_params"]["v_quant"] * 100)) / 100.0
-
-total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_clean, vol_quantile)
-df_clean['Signal'] = signal_score
-df_clean['Add_Signal'] = add_signals
-
-# ---------------------------------------------------------
-# 4. 頁面分頁結構
-# ---------------------------------------------------------
-tab1, tab2 = st.tabs(["📊 即時風控與加碼儀表板", "📈 歷史數據回測分析"])
-
-# =========================================================
-# TAB 1: 即時儀表板
-# =========================================================
-with tab1:
-    vol_threshold_hist = df_clean['Vol_20d'].expanding().quantile(vol_quantile)
-    current_price = float(df_clean['Close'].iloc[-1])
-    ath_price = float(df_clean['ATH'].iloc[-1])
-    ath_ratio = float(df_clean['ATH_Ratio'].iloc[-1])
-    current_vol = float(df_clean['Vol_20d'].iloc[-1])
-    vol_thresh_now = float(vol_threshold_hist.iloc[-1])
-    current_credit = float(credit_ratio.loc[df_clean.index[-1]])
-    thresh_credit_now = float(credit_threshold.loc[df_clean.index[-1]])
-    current_vix = float(vix_close.loc[df_clean.index[-1]])
-    vix_mavg_now = float(vix_mavg.loc[df_clean.index[-1]])
-    is_add_today = bool(df_clean['Add_Signal'].iloc[-1])
-
-    triggers = []
-    if current_vol > vol_thresh_now:
-        triggers.append(f"歷史波動率爆表 (當前 {current_vol*100:.1f}%)")
-    if current_credit < thresh_credit_now:
-        triggers.append("信用利差惡化 (高收益債相對強度偏弱)")
-    if current_vix > vix_mavg_now * 1.2 or current_vix > 25.0:
-        triggers.append(f"VIX 恐慌指數飆升 (當前 VIX: {current_vix:.2f})")
-
-    trigger_count = len(triggers)
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("當前價格", f"${current_price:.2f}", f"ATH: ${ath_price:.2f}")
-    col2.metric("相對於 ATH 比例", f"{ath_ratio*100:.1f}%")
-    col3.metric("VIX 恐慌指數", f"{current_vix:.2f}", f"均線: {vix_mavg_now:.2f}", delta_color="inverse")
-    col4.metric("信用利差 Proxy", f"{current_credit:.2f}", f"門檻: {thresh_credit_now:.2f}", delta_color="normal")
-
-    st.divider()
-
-    if is_add_today:
-        st.info("🔵 **當前訊號：VIX降溫與均線支撐加碼點！ (IV/VIX & MA Re-entry)**\n\n恐慌與流動性危機解除，且價格回測至均線支撐帶，建議分批低接加碼。")
-    elif trigger_count == 0:
-        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n各項流動性與泡沫指標正常，可維持原持倉。")
-    elif trigger_count == 1:
-        st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，提高防備。")
-    elif trigger_count == 2:
-        st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿部位。")
-    else:
-        st.error("🔴 **當前燈號：紅燈 (流動性危機/極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
-
-    st.subheader(f"📊 {target_symbol} 近期價格走勢與 MA20 / MA60 / MA240 均線聯防")
-    
-    recent_df = df_clean.iloc[-500:]
-    add_pts = recent_df[recent_df['Add_Signal']]
-
-    fig_price = go.Figure()
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['Close'], name="收盤價", line=dict(color='skyblue', width=2)))
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA20'], name="MA20 (月線)", line=dict(color='yellow', width=1, dash='dot')))
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA60'], name="MA60 (季線)", line=dict(color='orange', width=1)))
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA240'], name="MA240 (年線)", line=dict(color='magenta', width=1.5)))
-    
-    if not add_pts.empty:
-        fig_price.add_trace(go.Scatter(
-            x=add_pts.index, y=add_pts['Close'],
-            mode='markers',
-            name='🔵 VIX降溫與均線低接加碼點',
-            marker=dict(symbol='triangle-up', size=12, color='cyan')
-        ))
-
-    fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")
-    fig_price.update_layout(template="plotly_dark", height=450, margin=dict(l=20, r=20, t=30, b=20))
-    st.plotly_chart(fig_price, use_container_width=True)
-
-# =========================================================
-# TAB 2: 歷史回測分析
-# =========================================================
-with tab2:
-    st.header(f"📈 {target_symbol} 策略歷史回測分析")
-    st.caption("模擬規則：減碼純依據流動性與泡沫危機評分，加碼則嚴格要求 VIX 降溫並配合三條均線（MA20/60/240）支撐低接。")
-
-    position = np.where(df_clean['Signal'] >= 3, 0.0, np.where(df_clean['Signal'] == 2, 0.3, np.where(df_clean['Signal'] == 1, 0.7, 1.0)))
-    position_series = pd.Series(position, index=df_clean.index).shift(1).fillna(1.0)
-    strategy_returns = df_clean['Returns'] * position_series
-    
-    cum_bh = (1 + df_clean['Returns'].fillna(0)).cumprod()
-    cum_strat = (1 + strategy_returns.fillna(0)).cumprod()
-    
-    mdd_bh = ((cum_bh / cum_bh.cummax()) - 1).min()
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("買入持有 (B&H) 累積報酬", f"{(cum_bh.iloc[-1]-1)*100:.1f}%")
-    c2.metric("LBMS 策略累積報酬", f"{(cum_strat.iloc[-1]-1)*100:.1f}%")
-    c3.metric("B&H 最大回撤 (MDD)", f"{mdd_bh*100:.1f}%", delta_color="inverse")
-    c4.metric("LBMS 策略最大回撤 (MDD)", f"{mdd_strat*100:.1f}%", f"改善 {abs(mdd_bh-mdd_strat)*100:.1f}%", delta_color="normal")
-    
-    st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
-    fig_backtest = go.Figure()
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
-    fig_backtest.update_layout(template="plotly_dark", height=450, yaxis_type="log", title="資產對數淨值成長曲線")
-    st.plotly_chart(fig_backtest, use_container_width=True)
-
-    st.subheader("🔵 歷史安全加碼訊號紀錄")
-    add_df = df_clean[df_clean['Add_Signal']].copy()
-    if not add_df.empty:
-        add_df['ATH%'] = (add_df['ATH_Ratio'] * 100).round(1).astype(str) + '%'
-        add_df['波動率%'] = (add_df['Vol_20d'] * 100).round(1).astype(str) + '%'
-        st.dataframe(add_df[['Close', 'MA20', 'MA60', 'MA240', 'ATH%', '波動率%']].sort_index(ascending=False), use_container_width=True)
-    else:
-        st.info("歷史區間內未出現加碼訊號。")
+    pos_series = pd.Series(position, index=df.index).shift

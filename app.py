@@ -14,8 +14,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (均線聯防旗艦版)")
-st.caption("結合 B浪警戒、VIX 恐慌、信用利差、多維均線（MA20/60/240）與拉回低接加碼機制。")
+st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (一鍵最佳化旗艦版)")
+st.caption("結合 B浪警戒、VIX 恐慌、信用利差、多維均線（MA20/60/240）與一鍵最佳化參數搜尋。")
 
 # ---------------------------------------------------------
 # 2. 數據抓取與預處理
@@ -28,7 +28,7 @@ def load_data(ticker):
     return df
 
 st.sidebar.header("⚙️ 系統參數設定")
-target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="TQQQ")
+target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="SOXL")
 hyg_symbol = "HYG"
 tlt_symbol = "TLT"
 vix_symbol = "^VIX"
@@ -72,14 +72,13 @@ vix_mavg = vix_close.rolling(60).mean()
 cond_vix = (vix_close > vix_mavg * 1.2) | (vix_close > 25.0)
 
 # ---------------------------------------------------------
-# 3. 回測計算與加碼點判定核心函數 (低接加碼優化)
+# 3. 回測計算與加碼點判定核心函數
 # ---------------------------------------------------------
 def run_backtest(df, b_min, b_max, v_quant):
     vol_thresh = df['Vol_20d'].expanding().quantile(v_quant)
     cond_b = (df['ATH_Ratio'] >= b_min) & (df['ATH_Ratio'] <= b_max)
     cond_vol = df['Vol_20d'] > vol_thresh
     
-    # 綜合 4 維度評分：B浪區間 + 歷史波動率 + 信用利差 + VIX恐慌
     score = (
         cond_b.astype(int) + 
         cond_vol.astype(int) + 
@@ -88,10 +87,8 @@ def run_backtest(df, b_min, b_max, v_quant):
     )
     
     prev_score = score.shift(1).fillna(0)
-    # 加碼邏輯調整：風險警報解除 (score == 0) 且價格拉回低接（低於 MA20 98% 避免追在頂峰）
     add_signal = (prev_score >= 1) & (score == 0) & (df['Close'] < df['MA20'] * 0.98)
     
-    # 動態倉位控制 (滿分4分)
     position = np.where(score >= 3, 0.0, np.where(score == 2, 0.3, np.where(score == 1, 0.7, 1.0)))
     pos_series = pd.Series(position, index=df.index).shift(1).fillna(1.0)
     
@@ -103,11 +100,36 @@ def run_backtest(df, b_min, b_max, v_quant):
 
 df_clean = df_t.dropna(subset=['Vol_20d', 'ATH_Ratio', 'Returns', 'MA20', 'MA60', 'MA240']).copy()
 
-# 側邊欄參數設定
-st.sidebar.subheader("🎯 B浪與波動率參數設定")
-b_wave_min = st.sidebar.slider("類高點 (B浪) 下限 (ATH %)", 50, 95, 65) / 100.0
-b_wave_max = st.sidebar.slider("類高點 (B浪) 上限 (ATH %)", 60, 100, 97) / 100.0
-vol_quantile = st.sidebar.slider("VaR 波動率高位分位數 (%)", 75, 99, 85) / 100.0
+# Session State 預設參數
+if "best_params" not in st.session_state:
+    st.session_state["best_params"] = {"b_min": 0.65, "b_max": 0.97, "v_quant": 0.85}
+
+st.sidebar.subheader("🎯 參數與一鍵最佳化")
+
+if st.sidebar.button("⚡ 尋找該標的歷史最佳參數"):
+    with st.spinner("正在執行網格搜尋 (Grid Search) 尋找最佳風控參數..."):
+        best_score_metric = -999.0
+        best_combo = (0.65, 0.97, 0.85)
+        
+        for b_min in np.arange(0.60, 0.85, 0.05):
+            for b_max in np.arange(0.85, 0.98, 0.03):
+                for v_q in np.arange(0.75, 0.95, 0.05):
+                    ret, mdd, _, _ = run_backtest(df_clean, b_min, b_max, v_q)
+                    score_metric = ret + (mdd * 2.0)
+                    if score_metric > best_score_metric:
+                        best_score_metric = score_metric
+                        best_combo = (round(b_min, 2), round(b_max, 2), round(v_q, 2))
+        
+        st.session_state["best_params"] = {
+            "b_min": best_combo[0],
+            "b_max": best_combo[1],
+            "v_quant": best_combo[2]
+        }
+        st.sidebar.success(f"已套用最佳參數！\nB浪: {int(best_combo[0]*100)}%~{int(best_combo[1]*100)}%, VaR: {int(best_combo[2]*100)}%")
+
+b_wave_min = st.sidebar.slider("類高點 (B浪) 下限 (ATH %)", 50, 95, int(st.session_state["best_params"]["b_min"] * 100)) / 100.0
+b_wave_max = st.sidebar.slider("類高點 (B浪) 上限 (ATH %)", 60, 100, int(st.session_state["best_params"]["b_max"] * 100)) / 100.0
+vol_quantile = st.sidebar.slider("VaR 波動率高位分位數 (%)", 75, 99, int(st.session_state["best_params"]["v_quant"] * 100)) / 100.0
 
 total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_clean, b_wave_min, b_wave_max, vol_quantile)
 df_clean['Signal'] = signal_score
@@ -165,64 +187,4 @@ with tab1:
     else:
         st.error("🔴 **當前燈號：紅燈 (流動性危機/極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
 
-    st.subheader(f"📊 {target_symbol} 近期價格走勢與 MA20 / MA60 / MA240 均線聯防")
-    
-    recent_df = df_clean.iloc[-500:]
-    add_pts = recent_df[recent_df['Add_Signal']]
-
-    fig_price = go.Figure()
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['Close'], name="收盤價", line=dict(color='skyblue', width=2)))
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA20'], name="MA20 (月線)", line=dict(color='yellow', width=1, dash='dot')))
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA60'], name="MA60 (季線)", line=dict(color='orange', width=1)))
-    fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA240'], name="MA240 (年線)", line=dict(color='magenta', width=1.5)))
-    
-    if not add_pts.empty:
-        fig_price.add_trace(go.Scatter(
-            x=add_pts.index, y=add_pts['Close'],
-            mode='markers',
-            name='🔵 拉回低接加碼點',
-            marker=dict(symbol='triangle-up', size=12, color='cyan')
-        ))
-
-    fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")
-    fig_price.add_hrect(y0=ath_price*b_wave_min, y1=ath_price*b_wave_max, fillcolor="orange", opacity=0.15, line_width=0, annotation_text="B浪警戒區間")
-    fig_price.update_layout(template="plotly_dark", height=450, margin=dict(l=20, r=20, t=30, b=20))
-    st.plotly_chart(fig_price, use_container_width=True)
-
-# =========================================================
-# TAB 2: 歷史回測分析
-# =========================================================
-with tab2:
-    st.header(f"📈 {target_symbol} 多維均線聯防策略歷史回測")
-    st.caption("模擬規則：動態風控防禦，並於風險解除且價格回測月線下方時執行低接加碼。")
-
-    position = np.where(df_clean['Signal'] >= 3, 0.0, np.where(df_clean['Signal'] == 2, 0.3, np.where(df_clean['Signal'] == 1, 0.7, 1.0)))
-    position_series = pd.Series(position, index=df_clean.index).shift(1).fillna(1.0)
-    strategy_returns = df_clean['Returns'] * position_series
-    
-    cum_bh = (1 + df_clean['Returns'].fillna(0)).cumprod()
-    cum_strat = (1 + strategy_returns.fillna(0)).cumprod()
-    
-    mdd_bh = ((cum_bh / cum_bh.cummax()) - 1).min()
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("買入持有 (B&H) 累積報酬", f"{(cum_bh.iloc[-1]-1)*100:.1f}%")
-    c2.metric("LBMS 策略累積報酬", f"{(cum_strat.iloc[-1]-1)*100:.1f}%")
-    c3.metric("B&H 最大回撤 (MDD)", f"{mdd_bh*100:.1f}%", delta_color="inverse")
-    c4.metric("LBMS 策略最大回撤 (MDD)", f"{mdd_strat*100:.1f}%", f"改善 {abs(mdd_bh-mdd_strat)*100:.1f}%", delta_color="normal")
-    
-    st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
-    fig_backtest = go.Figure()
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
-    fig_backtest.update_layout(template="plotly_dark", height=450, yaxis_type="log", title="資產對數淨值成長曲線")
-    st.plotly_chart(fig_backtest, use_container_width=True)
-
-    st.subheader("🔵 歷史安全加碼訊號紀錄")
-    add_df = df_clean[df_clean['Add_Signal']].copy()
-    if not add_df.empty:
-        add_df['ATH%'] = (add_df['ATH_Ratio'] * 100).round(1).astype(str) + '%'
-        add_df['波動率%'] = (add_df['Vol_20d'] * 100).round(1).astype(str) + '%'
-        st.dataframe(add_df[['Close', 'MA20', 'MA60', 'MA240', 'ATH%', '波動率%']].sort_index(ascending=False), use_container_width=True)
-    else:
-        st.info("歷史區間內未出現加碼訊號。")
+    st.subheader(f"📊 {target_symbol} 近期價格走勢與 MA20

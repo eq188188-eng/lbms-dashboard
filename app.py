@@ -9,15 +9,8 @@ def run_backtest(df):
     # 原始均線支撐條件
     price_near_support = (df['Close'] < df['MA20']) | (df['Close'] < df['MA60']) | (df['Close'] < df['MA240'] * 1.05)
     
-    # 【優化項目】新增：計算成交量條件 (確保 yfinance 資料包含 Volume)
-    if 'Volume' in df.columns:
-        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-        volume_ok = df['Volume'] >= df['Vol_MA20'] * 0.8  # 至少不能極度無量
-    else:
-        volume_ok = True
-
-    # 【優化項目】綜合條件：籌碼壓力解除 + 接近均線 + 成交量配合
-    add_signal = (prev_score >= 1) & (score == 0) & price_near_support & volume_ok
+    # 原始買入信號（僅依據籌碼風險解除與均線位置）
+    add_signal = (prev_score >= 1) & (score == 0) & price_near_support
     
     position = np.where(score >= 3, 0.0, 
                         np.where(score == 2, 0.3, 

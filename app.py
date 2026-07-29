@@ -52,8 +52,14 @@ def load_and_validate_data():
             st.error(f"❌ 您的 CSV 缺少必要欄位: `{col}`。現有欄位為: {list(raw_df.columns)}")
             return None
 
+    # 強制使用 mixed 格式解析日期，避免日期格式不統一導致整欄變 NaT
     raw_df['Date'] = pd.to_datetime(raw_df['Date'], format='mixed', errors='coerce')
     raw_df = raw_df.dropna(subset=['Date'])
+    
+    if raw_df.empty:
+        st.error("❌ 錯誤：'Date' 欄位經過轉換後全部變成空值，請檢查您的 CSV 日期格式（建議如 YYYY-MM-DD）。")
+        return None
+        
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
     for col in ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']:
@@ -64,12 +70,13 @@ def load_and_validate_data():
     raw_df['MA240'] = raw_df['TAIEX'].rolling(window=240).mean()
     raw_df['MA120'] = raw_df['TAIEX'].rolling(window=120).mean()
     
-    return raw_df.dropna(subset=['TAIEX', '00631L'])
+    clean_df = raw_df.dropna(subset=['TAIEX', '00631L'])
+    return clean_df
 
 df = load_and_validate_data()
 
 if df is None or df.empty:
-    st.error("❌ 資料集載入失敗或內容為空，請檢查 CSV 內容。")
+    st.error("❌ 資料集載入失敗或內容為空，請檢查您的 `data.csv` 檔案內容是否正確。")
     st.stop()
 
 total_days = (df.index[-1] - df.index[0]).days

@@ -44,7 +44,6 @@ def load_and_validate_data():
         st.error(f"❌ 讀取 CSV 發生錯誤: {e}")
         return None
         
-    # 清洗欄位名稱空白
     raw_df.columns = raw_df.columns.str.strip()
     
     required_cols = ['Date', 'TAIEX', '00631L', 'NDFI', 'PCR_5MA']
@@ -57,14 +56,11 @@ def load_and_validate_data():
     raw_df = raw_df.dropna(subset=['Date'])
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
-    # 強制轉型數字
     for col in ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']:
         raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
         
-    # 填補空值
     raw_df = raw_df.ffill().bfill()
     
-    # 計算均線
     raw_df['MA240'] = raw_df['TAIEX'].rolling(window=240).mean()
     raw_df['MA120'] = raw_df['TAIEX'].rolling(window=120).mean()
     
@@ -76,22 +72,11 @@ if df is None or df.empty:
     st.error("❌ 資料集載入失敗或內容為空，請檢查 CSV 內容。")
     st.stop()
 
-# ==============================================================================
-# 3. 畫面即時資料診斷區 (幫助你一眼看出 00631L 價格是否正確)
-# ==============================================================================
-with st.expander("🔍 【重要】點此展開檢查 CSV 讀取狀況與 00631L 價格是否正常", expanded=False):
-    st.write(f"資料總筆數: {len(df)} 筆")
-    st.write(f"資料區間: {df.index[0].strftime('%Y-%m-%d')} 至 {df.index[-1].strftime('%Y-%m-%d')}")
-    st.dataframe(df[['TAIEX', '00631L', 'NDFI', 'PCR_5MA']].tail(5))
-    
-    if (df['00631L'] <= 0).any():
-        st.warning("⚠️ 警告：你的 `00631L` 欄位中包含 0 或負數，這會導致資產無法正常計算！請檢查原始 CSV 檔案。")
-
 total_days = (df.index[-1] - df.index[0]).days
 years = total_days / 365.25 if total_days > 0 else 1.0
 
 # ==============================================================================
-# 4. 修正後的雙策略動態回測引擎
+# 3. 修正後的雙策略動態回測引擎 (修復每日資產滾動連動)
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -115,44 +100,38 @@ def run_local_backtest(ma_column):
         c_ndfi = float(ndfi_vals[i])
         c_pcr = float(pcr_vals[i])
         
-        # 安全檢查：若 ETF 價格異常為 0 或 NaN，直接跳過當日計算避免報錯
-        if c_etf <= 0 or np.isnan(c_etf):
-            current_portfolio_value = cash + (etf_shares * c_etf if not np.isnan(c_etf) else 0)
-            portfolio_values.append(current_portfolio_value)
-            continue
-
-        # 1. 持倉中的出場邏輯
+        # 1. 如果持有部位，先檢查是否符合「出場」條件
         if in_position:
             if c_taiex < c_ma: # 跌破均線防守
-                cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
+                cash = (etf_shares * c_etf) * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🚨 跌破 {ma_column} ({c_ma:.1f})，全數強制清倉避險！")
             elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger: # 貪婪過熱出場
-                cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
+                cash = (etf_shares * c_etf) * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪 (NDFI:{c_ndfi})，全數獲利平倉！")
                 
-        # 2. 空倉中的進場邏輯
+        # 2. 如果是空手狀態，檢查是否符合「進場」條件
         else:
             if c_taiex >= c_ma:
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
-                    current_total = (etf_shares * c_etf) + cash
+                    current_total = cash  #此時全為現金
                     buy_budget = current_total * 0.50 # 50% 資金進場
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
-                    cash = current_total - (etf_shares * c_etf)
+                    cash = current_total - buy_budget
                     in_position = True
                     logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底 (NDFI:{c_ndfi})，50% 資金以價格 {c_etf} 進場！")
                     
-        # 每日結算總資產 = 現金 + 持股市值
+        # 3. 🔥 關鍵修正：每日結算總資產 = 現金餘額 + 當前持股市值（確保每天隨 00631L 價格波動）
         current_portfolio_value = cash + (etf_shares * c_etf)
         portfolio_values.append(current_portfolio_value)
         
     return portfolio_values, logs
 
 # ==============================================================================
-# 5. 績效指標計算函數
+# 4. 績效指標計算函數
 # ==============================================================================
 def calculate_metrics(portfolio_values):
     p_series = pd.Series(portfolio_values)
@@ -174,7 +153,7 @@ values_taiex = (df['TAIEX'] / taiex_start) * initial_capital
 ret_taiex, cagr_taiex, mdd_taiex = calculate_metrics(values_taiex.values)
 
 # ==============================================================================
-# 6. Streamlit 儀表板前端呈現
+# 5. Streamlit 儀表板前端呈現
 # ==============================================================================
 col1, col2, col3 = st.columns(3)
 with col1:

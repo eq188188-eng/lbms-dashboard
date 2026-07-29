@@ -1,6 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 
@@ -13,11 +14,11 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (網頁版)")
+st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (含歷史回測)")
 st.caption("透過微觀結構、波動率及信用利差，客觀監測資產類高點與流動性風險。")
 
 # ---------------------------------------------------------
-# 2. 側邊欄控制項 (Parameters)
+# 2. 側邊欄控制項
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ 系統參數設定")
 
@@ -35,12 +36,12 @@ vol_quantile = st.sidebar.slider("VaR 波動率高位分位數 (%)", 75, 99, 90)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_data(ticker):
-    df = yf.download(ticker, period="2y", interval="1d", progress=False)
+    df = yf.download(ticker, period="max", interval="1d", progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df
 
-with st.spinner("正在讀取全球市場數據..."):
+with st.spinner("正在讀取歷史市場數據..."):
     df_target = load_data(target_symbol)
     df_hyg = load_data(hyg_symbol)
     df_tlt = load_data(tlt_symbol)
@@ -49,87 +50,77 @@ if df_target.empty:
     st.error(f"無法取得標的 '{target_symbol}' 數據，請確認代碼是否正確。")
     st.stop()
 
-# --- 計算指標 ---
-current_price = float(df_target['Close'].iloc[-1])
-ath_price = float(df_target['High'].max())
-ath_ratio = current_price / ath_price
+# 數據時間對齊
+common_index = df_target.index.intersection(df_hyg.index).intersection(df_tlt.index)
+df_t = df_target.loc[common_index].copy()
+df_h = df_hyg.loc[common_index].copy()
+df_l = df_tlt.loc[common_index].copy()
 
-# 波動率計算
-df_target['Returns'] = df_target['Close'].pct_change()
-df_target['Vol_20d'] = df_target['Returns'].rolling(window=20).std() * (252 ** 0.5)
-current_vol = float(df_target['Vol_20d'].iloc[-1])
-vol_threshold = float(df_target['Vol_20d'].quantile(vol_quantile))
+# 指標計算
+df_t['ATH'] = df_t['High'].cummax()
+df_t['ATH_Ratio'] = df_t['Close'] / df_t['ATH']
 
-# 信用利差 Proxy 計算 (HYG / TLT)
-credit_ratio = df_hyg['Close'] / df_tlt['Close']
+df_t['Returns'] = df_t['Close'].pct_change()
+df_t['Vol_20d'] = df_t['Returns'].rolling(window=20).std() * (252 ** 0.5)
+vol_threshold_hist = df_t['Vol_20d'].expanding().quantile(vol_quantile)
+
+credit_ratio = df_h['Close'] / df_l['Close']
 credit_mavg = credit_ratio.rolling(20).mean()
-current_credit = float(credit_ratio.iloc[-1])
-threshold_credit = float(credit_mavg.iloc[-1] * 0.97)
+credit_threshold = credit_mavg * 0.97
+
+# 訊號歷史判定 (0:綠, 1:黃, 2:橘, 3:紅)
+cond_b_wave = (df_t['ATH_Ratio'] >= b_wave_min) & (df_t['ATH_Ratio'] <= b_wave_max)
+cond_vol = df_t['Vol_20d'] > vol_threshold_hist
+cond_credit = credit_ratio < credit_threshold
+
+signal_score = cond_b_wave.astype(int) + cond_vol.astype(int) + cond_credit.astype(int)
+df_t['Signal'] = signal_score # 0=綠, 1=黃, 2=橘, >=3=紅
 
 # ---------------------------------------------------------
-# 4. 風控訊號判定邏輯
+# 4. 頁面分頁結構 (Tabs)
 # ---------------------------------------------------------
-triggers = []
-if b_wave_min <= ath_ratio <= b_wave_max:
-    triggers.append(f"進入類高點 (B浪) 危險區 (當前為 ATH 的 {ath_ratio*100:.1f}%)")
+tab1, tab2 = st.tabs(["📊 即時風控儀表板", "📈 歷史數據回測分析"])
 
-if current_vol > vol_threshold:
-    triggers.append(f"波動率爆表 (當前 {current_vol*100:.1f}% > 門檻 {vol_threshold*100:.1f}%)")
+# =========================================================
+# TAB 1: 即時儀表板
+# =========================================================
+with tab1:
+    current_price = float(df_t['Close'].iloc[-1])
+    ath_price = float(df_t['ATH'].iloc[-1])
+    ath_ratio = float(df_t['ATH_Ratio'].iloc[-1])
+    current_vol = float(df_t['Vol_20d'].iloc[-1])
+    vol_thresh_now = float(vol_threshold_hist.iloc[-1])
+    current_credit = float(credit_ratio.iloc[-1])
+    thresh_credit_now = float(credit_threshold.iloc[-1])
 
-if current_credit < threshold_credit:
-    triggers.append("信用利差惡化 (高收益債相對強度弱於 20日均線 3%)")
+    triggers = []
+    if b_wave_min <= ath_ratio <= b_wave_max:
+        triggers.append(f"進入類高點危險區 (當前為 ATH 的 {ath_ratio*100:.1f}%)")
+    if current_vol > vol_thresh_now:
+        triggers.append(f"波動率爆表 (當前 {current_vol*100:.1f}% > 門檻 {vol_thresh_now*100:.1f}%)")
+    if current_credit < thresh_credit_now:
+        triggers.append("信用利差惡化 (高收益債相對強度偏弱)")
 
-trigger_count = len(triggers)
+    trigger_count = len(triggers)
 
-# ---------------------------------------------------------
-# 5. Dashboard 燈號與核心指標展示
-# ---------------------------------------------------------
-col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("當前價格", f"${current_price:.2f}", f"ATH: ${ath_price:.2f}")
+    col2.metric("相對於 ATH 比例", f"{ath_ratio*100:.1f}%")
+    col3.metric("20日年化波動率", f"{current_vol*100:.1f}%", f"門檻: {vol_thresh_now*100:.1f}%", delta_color="inverse")
+    col4.metric("信用利差 Proxy", f"{current_credit:.2f}", f"門檻: {thresh_credit_now:.2f}", delta_color="normal")
 
-col1.metric("當前價格", f"${current_price:.2f}", f"ATH: ${ath_price:.2f}")
-col2.metric("相對於 ATH 比例", f"{ath_ratio*100:.1f}%")
-col3.metric("20日年化波動率", f"{current_vol*100:.1f}%", f"門檻: {vol_threshold*100:.1f}%", delta_color="inverse")
-col4.metric("信用利差 Proxy", f"{current_credit:.2f}", f"門檻: {threshold_credit:.2f}", delta_color="normal")
+    st.divider()
 
-st.divider()
+    if trigger_count == 0:
+        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n市場結構與流動性正常，可維持原配置。")
+    elif trigger_count == 1:
+        st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，取消追高買單。")
+    elif trigger_count == 2:
+        st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿部位。")
+    else:
+        st.error("🔴 **當前燈號：紅燈 (極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
 
-# 狀態報告面板
-if trigger_count == 0:
-    st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n市場結構與流動性正常，可維持原配置或正常策略。")
-elif trigger_count == 1:
-    st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，取消追高買單，設定移動止損。")
-elif trigger_count == 2:
-    st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 進入微觀流動性風險區，建議現貨減碼 50%，清空槓桿部位。")
-else:
-    st.error("🔴 **當前燈號：紅燈 (極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 多重極限指標爆表，建議執行無條件清倉 (Market Sell) 並轉入現金避險。")
-
-# ---------------------------------------------------------
-# 6. 互動圖表區 (Plotly)
-# ---------------------------------------------------------
-st.subheader("📊 價格走勢與類高點 (B 浪) 警戒區間")
-
-fig_price = go.Figure()
-fig_price.add_trace(go.Scatter(x=df_target.index, y=df_target['Close'], name="收盤價", line=dict(color='skyblue', width=2)))
-fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")
-fig_price.add_hrect(y0=ath_price*b_wave_min, y1=ath_price*b_wave_max, fillcolor="orange", opacity=0.15, line_width=0, annotation_text="B 浪警戒區間")
-
-fig_price.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=30, b=20))
-st.plotly_chart(fig_price, use_container_width=True)
-
-col_chart1, col_chart2 = st.columns(2)
-
-with col_chart1:
-    st.subheader("📈 20日歷史波動率 (VaR 監測)")
-    fig_vol = go.Figure()
-    fig_vol.add_trace(go.Scatter(x=df_target.index, y=df_target['Vol_20d']*100, name="波動率 (%)", line=dict(color='magenta')))
-    fig_vol.add_hline(y=vol_threshold*100, line_dash="dash", line_color="red", annotation_text="VaR 警戒線")
-    fig_vol.update_layout(template="plotly_dark", height=300)
-    st.plotly_chart(fig_vol, use_container_width=True)
-
-with col_chart2:
-    st.subheader("💳 高收益債信用相對強度 (HYG/TLT)")
-    fig_credit = go.Figure()
-    fig_credit.add_trace(go.Scatter(x=credit_ratio.index, y=credit_ratio, name="HYG/TLT 比率", line=dict(color='yellow')))
-    fig_credit.add_trace(go.Scatter(x=credit_mavg.index, y=credit_mavg*0.97, name="風控警戒線", line=dict(color='red', dash='dash')))
-    fig_credit.update_layout(template="plotly_dark", height=300)
-    st.plotly_chart(fig_credit, use_container_width=True)
+    st.subheader("📊 價格走勢與類高點警戒區間")
+    fig_price = go.Figure()
+    fig_price.add_trace(go.Scatter(x=df_t.index[-500:], y=df_t['Close'].iloc[-500:], name="收盤價", line=dict(color='skyblue', width=2)))
+    fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")

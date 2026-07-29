@@ -14,8 +14,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (精簡流動性防禦版)")
-st.caption("透過 VIX 恐慌指數、歷史波動率及信用利差，客觀監測市場流動性風險與動態避險。")
+st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (完整旗艦版)")
+st.caption("整合 B浪（類高點）警戒區間、VIX恐慌指數、歷史波動率及信用利差的全方位預警與加碼系統。")
 
 # ---------------------------------------------------------
 # 2. 數據抓取與預處理
@@ -69,14 +69,16 @@ vix_mavg = vix_close.rolling(60).mean()
 cond_vix = (vix_close > vix_mavg * 1.2) | (vix_close > 25.0)
 
 # ---------------------------------------------------------
-# 3. 回測計算核心函數 (移除高位震盪條件，僅保留流動性與波動風險)
+# 3. 回測計算與加碼點判定核心函數 (含 B浪 + 歷史波動 + 信用 + VIX)
 # ---------------------------------------------------------
-def run_backtest(df, v_quant):
+def run_backtest(df, b_min, b_max, v_quant):
     vol_thresh = df['Vol_20d'].expanding().quantile(v_quant)
+    cond_b = (df['ATH_Ratio'] >= b_min) & (df['ATH_Ratio'] <= b_max)
     cond_vol = df['Vol_20d'] > vol_thresh
     
-    # 綜合評分：歷史波動率 + 信用利差 + VIX恐慌 (3分制)
+    # 綜合 4 維度評分：B浪區間 + 歷史波動率 + 信用利差 + VIX恐慌
     score = (
+        cond_b.astype(int) + 
         cond_vol.astype(int) + 
         cond_credit.loc[df.index].astype(int) + 
         cond_vix.loc[df.index].astype(int)
@@ -85,7 +87,7 @@ def run_backtest(df, v_quant):
     prev_score = score.shift(1).fillna(0)
     add_signal = (prev_score >= 1) & (score == 0) & (df['Close'] > df['MA20'])
     
-    # 動態倉位控制
+    # 動態倉位控制 (滿分4分)
     position = np.where(score >= 3, 0.0, np.where(score == 2, 0.3, np.where(score == 1, 0.7, 1.0)))
     pos_series = pd.Series(position, index=df.index).shift(1).fillna(1.0)
     
@@ -97,10 +99,13 @@ def run_backtest(df, v_quant):
 
 df_clean = df_t.dropna(subset=['Vol_20d', 'ATH_Ratio', 'Returns', 'MA20']).copy()
 
-# 參數控制
+# 側邊欄參數設定
+st.sidebar.subheader("🎯 B浪與波動率參數設定")
+b_wave_min = st.sidebar.slider("類高點 (B浪) 下限 (ATH %)", 50, 95, 65) / 100.0
+b_wave_max = st.sidebar.slider("類高點 (B浪) 上限 (ATH %)", 60, 100, 97) / 100.0
 vol_quantile = st.sidebar.slider("VaR 波動率高位分位數 (%)", 75, 99, 85) / 100.0
 
-total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_clean, vol_quantile)
+total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_clean, b_wave_min, b_wave_max, vol_quantile)
 df_clean['Signal'] = signal_score
 df_clean['Add_Signal'] = add_signals
 
@@ -126,6 +131,8 @@ with tab1:
     is_add_today = bool(df_clean['Add_Signal'].iloc[-1])
 
     triggers = []
+    if b_wave_min <= ath_ratio <= b_wave_max:
+        triggers.append(f"進入 B浪類高點危險區 (當前 ATH 比例: {ath_ratio*100:.1f}%)")
     if current_vol > vol_thresh_now:
         triggers.append(f"歷史波動率爆表 (當前 {current_vol*100:.1f}%)")
     if current_credit < thresh_credit_now:
@@ -144,17 +151,17 @@ with tab1:
     st.divider()
 
     if is_add_today:
-        st.info("🔵 **當前訊號：安全加碼點！ (Re-entry / Add Signal)**\n\n流動性危機解除且站穩 20 日均線，建議分批加碼/補回滿倉部位。")
+        st.info("🔵 **當前訊號：安全加碼點！ (Re-entry / Add Signal)**\n\n市場風險警報解除且站穩 20 日均線，建議分批加碼/補回滿倉部位。")
     elif trigger_count == 0:
-        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n市場流動性與恐慌指標正常，可維持原持倉。")
+        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n各項泡沫、波動與流動性指標正常，可維持原持倉。")
     elif trigger_count == 1:
-        st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 提高警覺，注意波動放大。")
+        st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，提高防備。")
     elif trigger_count == 2:
         st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿部位。")
     else:
         st.error("🔴 **當前燈號：紅燈 (流動性危機/極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
 
-    st.subheader(f"📊 {target_symbol} 近期價格走勢與加碼點")
+    st.subheader(f"📊 {target_symbol} 近期價格走勢、B浪警戒區與加碼點")
     
     recent_df = df_clean.iloc[-500:]
     add_pts = recent_df[recent_df['Add_Signal']]
@@ -172,6 +179,7 @@ with tab1:
         ))
 
     fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")
+    fig_price.add_hrect(y0=ath_price*b_wave_min, y1=ath_price*b_wave_max, fillcolor="orange", opacity=0.15, line_width=0, annotation_text="B浪警戒區間")
     fig_price.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig_price, use_container_width=True)
 
@@ -179,8 +187,8 @@ with tab1:
 # TAB 2: 歷史回測分析
 # =========================================================
 with tab2:
-    st.header(f"📈 {target_symbol} 流動性與恐慌預警策略回測")
-    st.caption("模擬規則：依據 VIX、信用利差與歷史波動率進行動態減碼與清倉，流動性危機解除且站上 MA20 時觸發加碼。")
+    st.header(f"📈 {target_symbol} 全方位防禦策略歷史回測")
+    st.caption("模擬規則：結合 B浪高點、VIX、信用利差進行動態倉位控制，風險解除且站上 MA20 時觸發藍燈加碼。")
 
     position = np.where(df_clean['Signal'] >= 3, 0.0, np.where(df_clean['Signal'] == 2, 0.3, np.where(df_clean['Signal'] == 1, 0.7, 1.0)))
     position_series = pd.Series(position, index=df_clean.index).shift(1).fillna(1.0)
@@ -207,7 +215,8 @@ with tab2:
     st.subheader("🔵 歷史安全加碼訊號紀錄")
     add_df = df_clean[df_clean['Add_Signal']].copy()
     if not add_df.empty:
+        add_df['ATH%'] = (add_df['ATH_Ratio'] * 100).round(1).astype(str) + '%'
         add_df['波動率%'] = (add_df['Vol_20d'] * 100).round(1).astype(str) + '%'
-        st.dataframe(add_df[['Close', 'MA20', '波動率%']].sort_index(ascending=False), use_container_width=True)
+        st.dataframe(add_df[['Close', 'MA20', 'ATH%', '波動率%']].sort_index(ascending=False), use_container_width=True)
     else:
         st.info("歷史區間內未出現加碼訊號。")

@@ -1,4 +1,9 @@
-@st.cache_data
+df = pd.read_csv(
+    "data.csv", 
+    sep=None,              # 自動偵測分隔符號（逗號、分號或 Tab）
+    engine="python",       # 使用 Python 引擎（容錯率較高，能處理不規則資料）
+    on_bad_lines="skip"    # 如果某一行格式真的錯誤，自動略過該行而不崩潰
+)@st.cache_data
 def load_local_data():
   import os
 

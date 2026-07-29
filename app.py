@@ -18,12 +18,12 @@ fee_rate = st.sidebar.slider("券商手續費率 (%)", min_value=0.0, max_value=
 tax_rate = st.sidebar.slider("槓桿 ETF 證交稅率 (%)", min_value=0.0, max_value=0.5, value=0.1, step=0.01) / 100
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 恐懼抄底閥值 (同時滿足或觸發極值)")
+st.sidebar.subheader("🎯 恐懼抄底閥值")
 ndfi_buy_trigger = st.sidebar.slider("NDFI 跌破此數值 (極度恐懼)", min_value=10, max_value=30, value=15, step=1)
 pcr_buy_trigger = st.sidebar.slider("5日 P/C Ratio 突破此數值 (避險極致)", min_value=0.9, max_value=1.3, value=1.05, step=0.05)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("💰 貪婪出場閥值 (滿足任一即獲利平倉)")
+st.sidebar.subheader("💰 貪婪出場閥值")
 ndfi_sell_trigger = st.sidebar.slider("NDFI 突破此數值 (市場過熱)", min_value=70, max_value=90, value=80, step=1)
 pcr_sell_trigger = st.sidebar.slider("5日 P/C Ratio 跌破此數值 (散戶瘋狂)", min_value=0.5, max_value=0.7, value=0.6, step=0.05)
 
@@ -39,21 +39,19 @@ if not os.path.exists(csv_filename):
 
 @st.cache_data
 def load_local_data():
-    # 讀取 CSV 並將日期設定為索引
     raw_df = pd.read_csv(csv_filename)
     raw_df['Date'] = pd.to_datetime(raw_df['Date'])
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
-    # 強制進行數字型態轉換
+    # 強制數字型態轉換
     raw_df['TAIEX'] = raw_df['TAIEX'].astype(float)
     raw_df['00631L'] = raw_df['00631L'].astype(float)
     raw_df['NDFI'] = raw_df['NDFI'].astype(float)
     raw_df['PCR_5MA'] = raw_df['PCR_5MA'].astype(float)
     
-    # 填補可能存在的缺失值
     raw_df = raw_df.ffill().bfill()
     
-    # 計算防守用均線
+    # 計算防守用雙均線
     raw_df['MA240'] = raw_df['TAIEX'].rolling(window=240).mean()
     raw_df['MA120'] = raw_df['TAIEX'].rolling(window=120).mean()
     return raw_df.dropna()
@@ -61,7 +59,7 @@ def load_local_data():
 df = load_local_data()
 
 # ==============================================================================
-# 3. 雙策略動態回測引擎 (純陣列運算，絕不噴型態錯誤)
+# 3. 雙策略動態回測引擎 (純陣列運算)
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -89,7 +87,7 @@ def run_local_backtest(ma_column):
         
         # 狀況 A：持有部位時（均線防守 或 貪婪平倉）
         if in_position:
-            if c_taiex < c_ma: # 1. 跌破防守均線 (避開系統性崩盤)
+            if c_taiex < c_ma: # 1. 跌破防守均線
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
@@ -103,7 +101,6 @@ def run_local_backtest(ma_column):
         # 狀況 B：空倉時（大盤在均線之上 + 情緒極度恐懼）
         else:
             if c_taiex >= c_ma:
-                # 抄底條件：當 NDFI 處於歷史低檔，且 Put/Call 比率過高（雙指標共振）
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
                     buy_budget = current_portfolio_value * 0.50 # 50% 折半配置
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
@@ -115,9 +112,9 @@ def run_local_backtest(ma_column):
         
     return portfolio_values, logs
 
-# 執行雙均線回測對比
+# 【徹底修復處】：直接乾淨呼叫同一個回測引擎，不再進行多餘的 locals() 判斷
 values_240, logs_240 = run_local_backtest('MA240')
-values_120, logs_120 = run_advanced_backtest('MA120') if 'run_advanced_backtest' in locals() else run_local_backtest('MA120')
+values_120, logs_120 = run_local_backtest('MA120')
 
 # ==============================================================================
 # 4. Streamlit 前端與圖表渲染

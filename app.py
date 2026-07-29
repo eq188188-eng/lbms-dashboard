@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (精準低接版)")
-st.caption("減碼純看流動性危機（B浪、歷史波動、信用利差、VIX），加碼則結合 IV/VIX 恐慌解除與多維均線（MA20/60/240）支撐。")
+st.caption("減碼純看流動性危機（歷史波動、信用利差、VIX），加碼則結合 IV/VIX 恐慌解除與多維均線（MA20/60/240）支撐。")
 
 # ---------------------------------------------------------
 # 2. 數據抓取與預處理
@@ -28,7 +28,7 @@ def load_data(ticker):
     return df
 
 st.sidebar.header("⚙️ 系統參數設定")
-target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="SOXL")
+target_symbol = st.sidebar.text_input("監控標的代碼 (Ticker)", value="TSM")
 hyg_symbol = "HYG"
 tlt_symbol = "TLT"
 vix_symbol = "^VIX"
@@ -72,15 +72,14 @@ vix_mavg = vix_close.rolling(60).mean()
 cond_vix = (vix_close > vix_mavg * 1.2) | (vix_close > 25.0)
 
 # ---------------------------------------------------------
-# 3. 回測計算核心函數 (減碼不看MA，加碼結合IV/VIX與MA支撐)
+# 3. 回測計算核心函數 (已移除 B 浪判定)
 # ---------------------------------------------------------
-def run_backtest(df, b_min, b_max, v_quant):
+def run_backtest(df, v_quant):
     vol_thresh = df['Vol_20d'].expanding().quantile(v_quant)
-    cond_b = (df['ATH_Ratio'] >= b_min) & (df['ATH_Ratio'] <= b_max)
     cond_vol = df['Vol_20d'] > vol_thresh
     
+    # 風險評分（用於減碼/倉位控制：僅保留歷史波動、信用利差、VIX，移除類高點）
     score = (
-        cond_b.astype(int) + 
         cond_vol.astype(int) + 
         cond_credit.loc[df.index].astype(int) + 
         cond_vix.loc[df.index].astype(int)
@@ -88,6 +87,7 @@ def run_backtest(df, b_min, b_max, v_quant):
     
     prev_score = score.shift(1).fillna(0)
     
+    # 加碼條件：流動性危機解除 (score == 0)，且 VIX 降溫，且價格位於三條均線附近或下方安全區
     vix_cooling = vix_close.loc[df.index] < vix_mavg.loc[df.index]
     price_near_support = (df['Close'] < df['MA20']) | (df['Close'] < df['MA60']) | (df['Close'] < df['MA240'] * 1.05)
     
@@ -106,36 +106,28 @@ df_clean = df_t.dropna(subset=['Vol_20d', 'ATH_Ratio', 'Returns', 'MA20', 'MA60'
 
 # Session State 預設參數
 if "best_params" not in st.session_state:
-    st.session_state["best_params"] = {"b_min": 0.65, "b_max": 0.97, "v_quant": 0.85}
+    st.session_state["best_params"] = {"v_quant": 0.85}
 
 st.sidebar.subheader("🎯 參數與一鍵最佳化")
 
 if st.sidebar.button("⚡ 尋找該標的歷史最佳參數"):
     with st.spinner("正在執行網格搜尋 (Grid Search) 尋找最佳風控參數..."):
         best_score_metric = -999.0
-        best_combo = (0.65, 0.97, 0.85)
+        best_v_q = 0.85
         
-        for b_min in np.arange(0.60, 0.85, 0.05):
-            for b_max in np.arange(0.85, 0.98, 0.03):
-                for v_q in np.arange(0.75, 0.95, 0.05):
-                    ret, mdd, _, _ = run_backtest(df_clean, b_min, b_max, v_q)
-                    score_metric = ret + (mdd * 2.0)
-                    if score_metric > best_score_metric:
-                        best_score_metric = score_metric
-                        best_combo = (round(b_min, 2), round(b_max, 2), round(v_q, 2))
+        for v_q in np.arange(0.75, 0.95, 0.02):
+            ret, mdd, _, _ = run_backtest(df_clean, v_q)
+            score_metric = ret + (mdd * 2.0)
+            if score_metric > best_score_metric:
+                best_score_metric = score_metric
+                best_v_q = round(v_q, 2)
         
-        st.session_state["best_params"] = {
-            "b_min": best_combo[0],
-            "b_max": best_combo[1],
-            "v_quant": best_combo[2]
-        }
-        st.sidebar.success(f"已套用最佳參數！\nB浪: {int(best_combo[0]*100)}%~{int(best_combo[1]*100)}%, VaR: {int(best_combo[2]*100)}%")
+        st.session_state["best_params"] = {"v_quant": best_v_q}
+        st.sidebar.success(f"已套用最佳參數！\nVaR 分位數: {int(best_v_q*100)}%")
 
-b_wave_min = st.sidebar.slider("類高點 (B浪) 下限 (ATH %)", 50, 95, int(st.session_state["best_params"]["b_min"] * 100)) / 100.0
-b_wave_max = st.sidebar.slider("類高點 (B浪) 上限 (ATH %)", 60, 100, int(st.session_state["best_params"]["b_max"] * 100)) / 100.0
 vol_quantile = st.sidebar.slider("VaR 波動率高位分位數 (%)", 75, 99, int(st.session_state["best_params"]["v_quant"] * 100)) / 100.0
 
-total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_clean, b_wave_min, b_wave_max, vol_quantile)
+total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_clean, vol_quantile)
 df_clean['Signal'] = signal_score
 df_clean['Add_Signal'] = add_signals
 
@@ -161,8 +153,6 @@ with tab1:
     is_add_today = bool(df_clean['Add_Signal'].iloc[-1])
 
     triggers = []
-    if b_wave_min <= ath_ratio <= b_wave_max:
-        triggers.append(f"進入 B浪類高點危險區 (當前 ATH 比例: {ath_ratio*100:.1f}%)")
     if current_vol > vol_thresh_now:
         triggers.append(f"歷史波動率爆表 (當前 {current_vol*100:.1f}%)")
     if current_credit < thresh_credit_now:
@@ -211,7 +201,6 @@ with tab1:
         ))
 
     fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")
-    fig_price.add_hrect(y0=ath_price*b_wave_min, y1=ath_price*b_wave_max, fillcolor="orange", opacity=0.15, line_width=0, annotation_text="B浪警戒區間")
     fig_price.update_layout(template="plotly_dark", height=450, margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig_price, use_container_width=True)
 

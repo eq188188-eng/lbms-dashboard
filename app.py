@@ -50,7 +50,7 @@ if df_target.empty:
     st.error(f"無法取得標的 '{target_symbol}' 數據，請確認代碼是否正確。")
     st.stop()
 
-# 數據時間對齊
+# 數據時間對齊與空值清理
 common_index = df_target.index.intersection(df_hyg.index).intersection(df_tlt.index)
 df_t = df_target.loc[common_index].copy()
 df_h = df_hyg.loc[common_index].copy()
@@ -68,13 +68,16 @@ credit_ratio = df_h['Close'] / df_l['Close']
 credit_mavg = credit_ratio.rolling(20).mean()
 credit_threshold = credit_mavg * 0.97
 
-# 訊號歷史判定 (0:綠, 1:黃, 2:橘, 3:紅)
+# 訊號歷史判定
 cond_b_wave = (df_t['ATH_Ratio'] >= b_wave_min) & (df_t['ATH_Ratio'] <= b_wave_max)
 cond_vol = df_t['Vol_20d'] > vol_threshold_hist
 cond_credit = credit_ratio < credit_threshold
 
 signal_score = cond_b_wave.astype(int) + cond_vol.astype(int) + cond_credit.astype(int)
-df_t['Signal'] = signal_score # 0=綠, 1=黃, 2=橘, >=3=紅
+df_t['Signal'] = signal_score.fillna(0)
+
+# 清除前段滾動計算所產生的 NaN 空值
+df_clean = df_t.dropna(subset=['Vol_20d', 'ATH_Ratio', 'Returns']).copy()
 
 # ---------------------------------------------------------
 # 4. 頁面分頁結構 (Tabs)
@@ -85,13 +88,13 @@ tab1, tab2 = st.tabs(["📊 即時風控儀表板", "📈 歷史數據回測分�
 # TAB 1: 即時儀表板
 # =========================================================
 with tab1:
-    current_price = float(df_t['Close'].iloc[-1])
-    ath_price = float(df_t['ATH'].iloc[-1])
-    ath_ratio = float(df_t['ATH_Ratio'].iloc[-1])
-    current_vol = float(df_t['Vol_20d'].iloc[-1])
-    vol_thresh_now = float(vol_threshold_hist.iloc[-1])
-    current_credit = float(credit_ratio.iloc[-1])
-    thresh_credit_now = float(credit_threshold.iloc[-1])
+    current_price = float(df_clean['Close'].iloc[-1])
+    ath_price = float(df_clean['ATH'].iloc[-1])
+    ath_ratio = float(df_clean['ATH_Ratio'].iloc[-1])
+    current_vol = float(df_clean['Vol_20d'].iloc[-1])
+    vol_thresh_now = float(vol_threshold_hist.loc[df_clean.index[-1]])
+    current_credit = float(credit_ratio.loc[df_clean.index[-1]])
+    thresh_credit_now = float(credit_threshold.loc[df_clean.index[-1]])
 
     triggers = []
     if b_wave_min <= ath_ratio <= b_wave_max:
@@ -106,21 +109,4 @@ with tab1:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("當前價格", f"${current_price:.2f}", f"ATH: ${ath_price:.2f}")
     col2.metric("相對於 ATH 比例", f"{ath_ratio*100:.1f}%")
-    col3.metric("20日年化波動率", f"{current_vol*100:.1f}%", f"門檻: {vol_thresh_now*100:.1f}%", delta_color="inverse")
-    col4.metric("信用利差 Proxy", f"{current_credit:.2f}", f"門檻: {thresh_credit_now:.2f}", delta_color="normal")
-
-    st.divider()
-
-    if trigger_count == 0:
-        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n市場結構與流動性正常，可維持原配置。")
-    elif trigger_count == 1:
-        st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，取消追高買單。")
-    elif trigger_count == 2:
-        st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿部位。")
-    else:
-        st.error("🔴 **當前燈號：紅燈 (極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
-
-    st.subheader("📊 價格走勢與類高點警戒區間")
-    fig_price = go.Figure()
-    fig_price.add_trace(go.Scatter(x=df_t.index[-500:], y=df_t['Close'].iloc[-500:], name="收盤價", line=dict(color='skyblue', width=2)))
-    fig_price.add_hline(y=ath_price, line_dash="dash", line_color="gray", annotation_text="歷史最高點 (ATH)")
+    col3.metric("20日年

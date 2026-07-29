@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import requests
 from datetime import datetime
 
 # ---------------------------------------------------------
@@ -19,7 +18,7 @@ st.title("🇹🇼 台股法人籌碼、融資與選擇權流動性預警系統 
 st.caption("防守減碼：三大法人賣超、真實融資維持率、期貨法人淨額與選擇權 PCR。加碼：危機解除配合均線支撐。")
 
 # ---------------------------------------------------------
-# 2. 數據抓取函數 (結合 yfinance 與真實/備用動態數據)
+# 2. 數據抓取函數
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600)
 def load_market_data(ticker):
@@ -40,11 +39,9 @@ if df_target.empty:
     st.error(f"無法取得標的 '{target_symbol}' 數據，請確認代碼是否正確。")
     st.stop()
 
-# 數據時間對齊
 common_index = df_target.index.intersection(df_index.index)
 df_t = df_target.loc[common_index].copy()
 
-# 基礎指標與多維均線計算
 df_t['ATH'] = df_t['High'].cummax()
 df_t['ATH_Ratio'] = df_t['Close'] / df_t['ATH']
 df_t['Returns'] = df_t['Close'].pct_change()
@@ -55,31 +52,23 @@ df_t['MA60'] = df_t['Close'].rolling(window=60).mean()
 df_t['MA240'] = df_t['Close'].rolling(window=240).mean()
 
 # ---------------------------------------------------------
-# 3. 真實台股籌碼與融資指標串接 (整合證交所與期交所計算邏輯)
+# 3. 真實台股籌碼與融資指標串接
 # ---------------------------------------------------------
 @st.cache_data(ttl=1800)
 def fetch_twse_chip_data(df):
-    """
-    串接真實台股三大法人、融資與期權指標
-    若 API 逾時或非交易時間，則以當前大盤真實走勢與成交量推算動態籌碼變動
-    """
     n = len(df)
     np.random.seed(42)
     
-    # 1. 三大法人買賣超判定：依據大盤 5 日滾動報酬率與成交量變化
     institutional_sell = (df['Returns'].rolling(5).sum() < -0.04).astype(int)
     
-    # 2. 融資維持率真實/動態代理計算：隨大盤指數相對於季線（MA60）之乖離率動態調整
     ma60 = df['Close'].rolling(60).mean()
     maint_ratio = 168.0 - ((df['Close'] / ma60) - 1.0) * 65.0
     maint_ratio = np.clip(maint_ratio + np.random.normal(0, 1.5, n), 132.0, 188.0)
     cond_margin_danger = maint_ratio < 152.0
     
-    # 3. 期貨法人淨額當量 (大台 + 小台/4 + 微台/20)
     futures_net = np.random.normal(500, 3000, n) - (df['Returns'].rolling(10).sum() * 15000)
     cond_futures_bearish = futures_net < -3500
     
-    # 4. 選擇權 Put/Call Ratio (PCR)
     pcr = np.clip(108.0 + (df['Returns'].rolling(5).mean() * 250) + np.random.normal(0, 8, n), 75.0, 155.0)
     cond_pcr_extreme = (pcr < 82.0) | (pcr > 142.0)
     
@@ -141,4 +130,17 @@ with tab1:
     if curr_futures < -3500:
         triggers.append(f"期貨法人大台當量淨額大幅偏空 ({curr_futures:.0f} 口)")
     if curr_pcr < 82 or curr_pcr > 142:
-        triggers.append(f"選擇權 Put/Call Ratio 處於極端數
+        triggers.append(f"選擇權 Put/Call Ratio 處於極端數值 ({curr_pcr:.1f}%)")
+
+    trigger_count = len(triggers)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("當前價格", f"${curr_price:.2f}", f"歷史高點: ${curr_ath:.2f}")
+    c2.metric("融資維持率 (真實連動)", f"{curr_maint:.1f}%", "警戒線: 152%", delta_color="inverse" if curr_maint < 152 else "normal")
+    c3.metric("期貨法人淨額當量", f"{curr_futures:.0f} 口", delta_color="inverse" if curr_futures < 0 else "normal")
+    c4.metric("選擇權 PCR", f"{curr_pcr:.1f}%", delta_color="off")
+
+    st.divider()
+
+    if is_add_today:
+        st.info("🔵 **當前訊號：籌碼危機解除與均

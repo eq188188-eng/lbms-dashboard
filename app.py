@@ -28,64 +28,70 @@ ndfi_sell_trigger = st.sidebar.slider("NDFI 突破此數值 (市場過熱)", min
 pcr_sell_trigger = st.sidebar.slider("5日 P/C Ratio 跌破此數值 (散戶瘋狂)", min_value=0.5, max_value=0.7, value=0.6, step=0.05)
 
 # ==============================================================================
-# 2. 安全讀取本地 CSV 檔案 (增強欄位防錯與清洗)
+# 2. 安全讀取與嚴格檢查本地 CSV 檔案
 # ==============================================================================
 csv_filename = "data.csv"
 
 if not os.path.exists(csv_filename):
-    st.error(f"❌ 找不到數據檔案！請確認您的 GitHub 專案根目錄下已放置名為 `{csv_filename}` 的檔案。")
+    st.error(f"❌ 找不到數據檔案！請確認您的專案根目錄下已放置 `{csv_filename}`。")
     st.stop()
 
 @st.cache_data
-def load_local_data():
-    raw_df = pd.read_csv(csv_filename)
-    
-    # 清洗欄位名稱的空白字元
+def load_and_validate_data():
+    try:
+        raw_df = pd.read_csv(csv_filename)
+    except Exception as e:
+        st.error(f"❌ 讀取 CSV 發生錯誤: {e}")
+        return None
+        
+    # 清洗欄位名稱空白
     raw_df.columns = raw_df.columns.str.strip()
     
-    if 'Date' not in raw_df.columns:
-        st.error("❌ CSV 檔案中找不到 `Date` 欄位！")
-        return None
+    required_cols = ['Date', 'TAIEX', '00631L', 'NDFI', 'PCR_5MA']
+    for col in required_cols:
+        if col not in raw_df.columns:
+            st.error(f"❌ 您的 CSV 缺少必要欄位: `{col}`。現有欄位為: {list(raw_df.columns)}")
+            return None
 
     raw_df['Date'] = pd.to_datetime(raw_df['Date'], format='mixed', errors='coerce')
     raw_df = raw_df.dropna(subset=['Date'])
-    
-    if raw_df.empty:
-        return None
-        
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
-    # 強制將重要欄位轉為數字
-    target_cols = ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']
-    for col in target_cols:
-        if col in raw_df.columns:
-            raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
-        else:
-            st.error(f"❌ CSV 檔案中缺少必要欄位: `{col}`")
-            return None
-            
+    # 強制轉型數字
+    for col in ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']:
+        raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
+        
+    # 填補空值
     raw_df = raw_df.ffill().bfill()
     
+    # 計算均線
     raw_df['MA240'] = raw_df['TAIEX'].rolling(window=240).mean()
     raw_df['MA120'] = raw_df['TAIEX'].rolling(window=120).mean()
+    
     return raw_df.dropna(subset=['TAIEX', '00631L'])
 
-df = load_local_data()
+df = load_and_validate_data()
 
 if df is None or df.empty:
-    st.error("❌ 載入的資料集為空或格式錯誤！請檢查您的 `data.csv` 欄位與內容。")
+    st.error("❌ 資料集載入失敗或內容為空，請檢查 CSV 內容。")
     st.stop()
 
-# 顯示前端偵錯資訊，讓使用者一眼看出資料有沒有抓到 00631L
-with st.expander("🔍 點擊展開檢視已載入的資料摘要與欄位確認"):
-    st.write(f"資料筆數總計: {len(df)} 筆")
-    st.write(df[['TAIEX', '00631L', 'NDFI', 'PCR_5MA']].tail(3))
+# ==============================================================================
+# 3. 畫面即時資料診斷區 (幫助你一眼看出 00631L 價格是否正確)
+# ==============================================================================
+with st.expander("🔍 【重要】點此展開檢查 CSV 讀取狀況與 00631L 價格是否正常", expanded=False):
+    st.write(f"資料總筆數: {len(df)} 筆")
+    st.write(f"資料區間: {df.index[0].strftime('%Y-%m-%d')} 至 {df.index[-1].strftime('%Y-%m-%d')}")
+    st.dataframe(df[['TAIEX', '00631L', 'NDFI', 'PCR_5MA']].tail(5))
+    
+    if (df['00631L'] <= 0).any():
+        st.warning("⚠️ 警告：你的 `00631L` 欄位中包含 0 或負數，這會導致資產無法正常計算！請檢查原始 CSV 檔案。")
 
 total_days = (df.index[-1] - df.index[0]).days
 years = total_days / 365.25 if total_days > 0 else 1.0
 
 # ==============================================================================
-# 3. 雙策略動態回測引擎
+# 4. 修正後的雙策略動態回測引擎
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -109,20 +115,26 @@ def run_local_backtest(ma_column):
         c_ndfi = float(ndfi_vals[i])
         c_pcr = float(pcr_vals[i])
         
-        # 狀況 A：持有部位時（均線防守 或 貪婪平倉）
+        # 安全檢查：若 ETF 價格異常為 0 或 NaN，直接跳過當日計算避免報錯
+        if c_etf <= 0 or np.isnan(c_etf):
+            current_portfolio_value = cash + (etf_shares * c_etf if not np.isnan(c_etf) else 0)
+            portfolio_values.append(current_portfolio_value)
+            continue
+
+        # 1. 持倉中的出場邏輯
         if in_position:
-            if c_taiex < c_ma: # 1. 跌破防守均線
+            if c_taiex < c_ma: # 跌破均線防守
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
-                logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🚨 跌破 {ma_column}，全數強制清倉避險！")
-            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger: # 2. 過熱出場
+                logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🚨 跌破 {ma_column} ({c_ma:.1f})，全數強制清倉避險！")
+            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger: # 貪婪過熱出場
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
-                logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪，全數獲利平倉！")
+                logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪 (NDFI:{c_ndfi})，全數獲利平倉！")
                 
-        # 狀況 B：空倉時（大盤在均線之上 + 恐懼抄底）
+        # 2. 空倉中的進場邏輯
         else:
             if c_taiex >= c_ma:
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
@@ -131,16 +143,16 @@ def run_local_backtest(ma_column):
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
                     cash = current_total - (etf_shares * c_etf)
                     in_position = True
-                    logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底，50% 資金進場！")
+                    logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底 (NDFI:{c_ndfi})，50% 資金以價格 {c_etf} 進場！")
                     
-        # 每日計算總資產價值
-        current_portfolio_value = (etf_shares * c_etf) + cash
+        # 每日結算總資產 = 現金 + 持股市值
+        current_portfolio_value = cash + (etf_shares * c_etf)
         portfolio_values.append(current_portfolio_value)
         
     return portfolio_values, logs
 
 # ==============================================================================
-# 4. 績效指標計算功能
+# 5. 績效指標計算函數
 # ==============================================================================
 def calculate_metrics(portfolio_values):
     p_series = pd.Series(portfolio_values)
@@ -162,7 +174,7 @@ values_taiex = (df['TAIEX'] / taiex_start) * initial_capital
 ret_taiex, cagr_taiex, mdd_taiex = calculate_metrics(values_taiex.values)
 
 # ==============================================================================
-# 5. Streamlit 前端與高級圖表渲染
+# 6. Streamlit 儀表板前端呈現
 # ==============================================================================
 col1, col2, col3 = st.columns(3)
 with col1:

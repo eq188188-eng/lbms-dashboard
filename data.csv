@@ -5,28 +5,31 @@ import os
 @st.cache_data
 def load_local_data():
     if not os.path.exists("data.csv"):
-        # 檔案不存在時回傳帶有預設欄位的空 DataFrame
         return pd.DataFrame(columns=["Date", "TAIEX", "00631L", "NDFI", "PCR_5MA"])
 
     try:
-        # 使用容錯率更高的方式讀取 CSV
+        # 強制指定用 Python 引擎、自動偵測分隔號、遇到壞掉的行直接自動略過
         raw_df = pd.read_csv(
             "data.csv", 
-            sep=None,              # 自動偵測分隔符號
-            engine="python",       # 使用 Python 引擎容錯
-            on_bad_lines="skip"    # 自動略過格式壞掉的行
+            sep=None, 
+            engine="python", 
+            on_bad_lines="skip"
         )
+        
+        # 檢查是否不小心抓到網頁原始碼（防呆：如果讀進來的欄位名稱包含 html 標籤）
+        if len(raw_df.columns) == 1 and "<html" in str(raw_df.columns[0]).lower():
+            st.error("錯誤：讀取到的 data.csv 內容是網頁原始碼（可能下載連結錯誤或檔案不存在），請檢查檔案內容！")
+            return pd.DataFrame(columns=["Date", "TAIEX", "00631L", "NDFI", "PCR_5MA"])
 
-        # 1. 處理 Date 欄位
+        # 處理日期
         if "Date" in raw_df.columns:
             raw_df["Date"] = pd.to_datetime(raw_df["Date"], errors="coerce")
             raw_df = raw_df.dropna(subset=["Date"])
 
-        # 2. 強制把數值欄位轉成數字（防止 CSV 裡面夾帶奇怪的字串或千分位逗號造成崩潰）
+        # 數值清洗
         numeric_cols = ["TAIEX", "00631L", "NDFI", "PCR_5MA"]
         for col in numeric_cols:
             if col in raw_df.columns:
-                # 如果有字串型態的數字，先清掉逗號再轉 float
                 if raw_df[col].dtype == object:
                     raw_df[col] = raw_df[col].astype(str).str.replace(",", "", regex=True)
                 raw_df[col] = pd.to_numeric(raw_df[col], errors="coerce")
@@ -37,5 +40,4 @@ def load_local_data():
         st.error(f"讀取 data.csv 發生錯誤: {e}")
         return pd.DataFrame(columns=["Date", "TAIEX", "00631L", "NDFI", "PCR_5MA"])
 
-# 測試呼叫（確保頁面能拿到 df）
 df = load_local_data()

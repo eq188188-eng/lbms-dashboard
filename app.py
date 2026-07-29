@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import streamlit as st  
+import streamlit as st  # 👈 務必確保這行在檔案最頂端第一組匯入中
 import os
 
 # 基本網頁排版設定
@@ -28,7 +28,7 @@ ndfi_sell_trigger = st.sidebar.slider("NDFI 突破此數值 (市場過熱)", min
 pcr_sell_trigger = st.sidebar.slider("5日 P/C Ratio 跌破此數值 (散戶瘋狂)", min_value=0.5, max_value=0.7, value=0.6, step=0.05)
 
 # ==============================================================================
-# 2. 安全讀取本地 CSV 檔案 (帶完整防錯與型態轉換)
+# 2. 安全讀取本地 CSV 檔案 (帶防錯提示與防呆檢查)
 # ==============================================================================
 csv_filename = "data.csv"
 
@@ -48,7 +48,6 @@ def load_local_data():
         
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
-    # 強制將數值欄位轉為 float，避免字串引發計算錯誤
     for col in ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']:
         if col in raw_df.columns:
             raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
@@ -64,10 +63,6 @@ df = load_local_data()
 if df is None or df.empty:
     st.error("❌ 載入的資料集為空或格式錯誤！請檢查您的 `data.csv` 檔案內容與欄位名稱。")
     st.stop()
-
-# 偵錯用展開區塊：如果您懷疑 00631L 價格或欄位有問題，可在此展開檢視
-with st.expander("🔍 點擊檢視已載入的 CSV 資料預覽 (偵錯用)"):
-    st.write(df.tail(10))
 
 # 計算回測總年數，用於 CAGR 公式
 total_days = (df.index[-1] - df.index[0]).days

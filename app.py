@@ -76,7 +76,7 @@ total_days = (df.index[-1] - df.index[0]).days
 years = total_days / 365.25 if total_days > 0 else 1.0
 
 # ==============================================================================
-# 3. 修正後的雙策略動態回測引擎 (修復每日資產滾動連動)
+# 3. 雙策略動態回測引擎 (修復每日資產滾動連動)
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -117,14 +117,14 @@ def run_local_backtest(ma_column):
         else:
             if c_taiex >= c_ma:
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
-                    current_total = cash  #此時全為現金
+                    current_total = cash  
                     buy_budget = current_total * 0.50 # 50% 資金進場
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
                     cash = current_total - buy_budget
                     in_position = True
                     logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底 (NDFI:{c_ndfi})，50% 資金以價格 {c_etf} 進場！")
                     
-        # 3. 🔥 關鍵修正：每日結算總資產 = 現金餘額 + 當前持股市值（確保每天隨 00631L 價格波動）
+        # 3. 每日結算總資產 = 現金餘額 + 當前持股市值
         current_portfolio_value = cash + (etf_shares * c_etf)
         portfolio_values.append(current_portfolio_value)
         

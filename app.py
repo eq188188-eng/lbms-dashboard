@@ -12,7 +12,6 @@ st.title("📊 00631L 本地數據版 (NDFI + Put/Call Ratio) 雙策略儀表板
 # ==============================================================================
 st.sidebar.header("🛠️ 策略參數調整面板")
 
-# 資金與成本設定
 initial_capital = st.sidebar.number_input("初始投資本金 (TWD)", min_value=100000, max_value=10000000, value=1000000, step=100000)
 fee_rate = st.sidebar.slider("券商手續費率 (%)", min_value=0.0, max_value=0.5, value=0.1425, step=0.01) / 100
 tax_rate = st.sidebar.slider("槓桿 ETF 證交稅率 (%)", min_value=0.0, max_value=0.5, value=0.1, step=0.01) / 100
@@ -28,7 +27,7 @@ ndfi_sell_trigger = st.sidebar.slider("NDFI 突破此數值 (市場過熱)", min
 pcr_sell_trigger = st.sidebar.slider("5日 P/C Ratio 跌破此數值 (散戶瘋狂)", min_value=0.5, max_value=0.7, value=0.6, step=0.05)
 
 # ==============================================================================
-# 2. 安全讀取本地 CSV 檔案 (帶防錯提示)
+# 2. 安全讀取本地 CSV 檔案 (帶防錯與欄位淨化)
 # ==============================================================================
 csv_filename = "data.csv"
 
@@ -40,10 +39,11 @@ if not os.path.exists(csv_filename):
 @st.cache_data
 def load_local_data():
     raw_df = pd.read_csv(csv_filename)
+    raw_df.columns = raw_df.columns.str.strip()  # 清除欄位空白
+    
     raw_df['Date'] = pd.to_datetime(raw_df['Date'])
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
-    # 強制數字型態轉換
     raw_df['TAIEX'] = raw_df['TAIEX'].astype(float)
     raw_df['00631L'] = raw_df['00631L'].astype(float)
     raw_df['NDFI'] = raw_df['NDFI'].astype(float)
@@ -51,7 +51,6 @@ def load_local_data():
     
     raw_df = raw_df.ffill().bfill()
     
-    # 計算防守用雙均線
     raw_df['MA240'] = raw_df['TAIEX'].rolling(window=240).mean()
     raw_df['MA120'] = raw_df['TAIEX'].rolling(window=120).mean()
     return raw_df.dropna()
@@ -59,7 +58,7 @@ def load_local_data():
 df = load_local_data()
 
 # ==============================================================================
-# 3. 雙策略動態回測引擎 (純陣列運算)
+# 3. 雙策略動態回測引擎
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -85,34 +84,30 @@ def run_local_backtest(ma_column):
         
         current_portfolio_value = (etf_shares * c_etf) + cash
         
-        # 狀況 A：持有部位時（均線防守 或 貪婪平倉）
         if in_position:
-            if c_taiex < c_ma: # 1. 跌破防守均線
+            if c_taiex < c_ma:
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🚨 跌破 {ma_column}，全數強制清倉避險！")
-            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger: # 2. 市場回到過熱貪婪區
+            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger:
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
-                logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪 (NDFI > {ndfi_sell_trigger} 或 PCR < {pcr_sell_trigger})，全數獲利平倉！")
-                
-        # 狀況 B：空倉時（大盤在均線之上 + 情緒極度恐懼）
+                logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪，全數獲利平倉！")
         else:
             if c_taiex >= c_ma:
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
-                    buy_budget = current_portfolio_value * 0.50 # 50% 折半配置
+                    buy_budget = current_portfolio_value * 0.50
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
                     cash = current_portfolio_value - (etf_shares * c_etf)
                     in_position = True
-                    logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底 (NDFI < {ndfi_buy_trigger} 且 PCR > {pcr_buy_trigger})，50% 資金進場！")
+                    logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底，50% 資金進場！")
                     
         portfolio_values.append((etf_shares * c_etf) + cash)
         
     return portfolio_values, logs
 
-# 【徹底修復處】：直接乾淨呼叫同一個回測引擎，不再進行多餘的 locals() 判斷
 values_240, logs_240 = run_local_backtest('MA240')
 values_120, logs_120 = run_local_backtest('MA120')
 

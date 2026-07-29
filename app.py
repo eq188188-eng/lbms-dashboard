@@ -97,7 +97,6 @@ if st.sidebar.button("⚡ 尋找該標的歷史最佳參數"):
             for b_max in np.arange(0.85, 0.98, 0.03):
                 for v_q in np.arange(0.75, 0.95, 0.05):
                     ret, mdd, _ = run_backtest(df_clean, b_min, b_max, v_q)
-                    # 評分標準：兼顧降低最大回撤與提高夏普/報酬
                     score_metric = ret + (mdd * 2.0)
                     if score_metric > best_score_metric:
                         best_score_metric = score_metric
@@ -178,4 +177,34 @@ with tab1:
 # TAB 2: 歷史回測分析
 # =========================================================
 with tab2:
-    st
+    st.header(f"📈 {target_symbol} 風控策略歷史回測模擬")
+    st.caption("模擬規則：綠燈/黃燈 100% 持倉；橘燈 50% 減碼避險；紅燈 100% 清倉轉入現金。")
+
+    position = np.where(df_clean['Signal'] >= 3, 0.0, np.where(df_clean['Signal'] == 2, 0.5, 1.0))
+    position_series = pd.Series(position, index=df_clean.index).shift(1).fillna(1.0)
+    strategy_returns = df_clean['Returns'] * position_series
+    
+    cum_bh = (1 + df_clean['Returns'].fillna(0)).cumprod()
+    cum_strat = (1 + strategy_returns.fillna(0)).cumprod()
+    
+    mdd_bh = ((cum_bh / cum_bh.cummax()) - 1).min()
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("買入持有 (B&H) 累積報酬", f"{(cum_bh.iloc[-1]-1)*100:.1f}%")
+    c2.metric("LBMS 避險策略 累積報酬", f"{(cum_strat.iloc[-1]-1)*100:.1f}%")
+    c3.metric("B&H 最大回撤 (MDD)", f"{mdd_bh*100:.1f}%", delta_color="inverse")
+    c4.metric("LBMS 策略最大回撤 (MDD)", f"{mdd_strat*100:.1f}%", f"改善 {abs(mdd_bh-mdd_strat)*100:.1f}%", delta_color="normal")
+    
+    st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
+    fig_backtest = go.Figure()
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
+    fig_backtest.update_layout(template="plotly_dark", height=450, yaxis_type="log", title="資產對數淨值成長曲線 (可放大檢視歷史時期)")
+    st.plotly_chart(fig_backtest, use_container_width=True)
+
+    st.subheader("🔴 歷史橘燈與紅燈觸發紀錄")
+    danger_df = df_clean[df_clean['Signal'] >= 2].copy()
+    if not danger_df.empty:
+        danger_df['Signal_Name'] = danger_df['Signal'].map({2: '🟠 橘燈 (減碼)', 3: '🔴 紅燈 (清倉)'})
+        danger_df['ATH%'] = (danger_df['ATH_Ratio'] * 100).round(1).astype(str) + '%'
+        danger_df['波動率%'] = (danger_df

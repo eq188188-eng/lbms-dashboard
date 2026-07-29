@@ -69,7 +69,6 @@ def run_backtest(df, b_min, b_max, v_quant):
     
     score = cond_b.astype(int) + cond_v.astype(int) + cond_credit.loc[df.index].astype(int)
     
-    # 判斷加碼點邏輯：從警示燈號(>=1)轉為綠燈(0) 且 價格站在20日均線之上
     prev_score = score.shift(1).fillna(0)
     add_signal = (prev_score >= 1) & (score == 0) & (df['Close'] > df['MA20'])
     
@@ -184,7 +183,6 @@ with tab1:
     fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['Close'], name="收盤價", line=dict(color='skyblue', width=2)))
     fig_price.add_trace(go.Scatter(x=recent_df.index, y=recent_df['MA20'], name="20日均線", line=dict(color='yellow', width=1, dash='dot')))
     
-    # 繪製加碼點買入標記 (藍色向上箭頭)
     if not add_pts.empty:
         fig_price.add_trace(go.Scatter(
             x=add_pts.index, y=add_pts['Close'],
@@ -218,4 +216,10 @@ with tab2:
     c1.metric("買入持有 (B&H) 累積報酬", f"{(cum_bh.iloc[-1]-1)*100:.1f}%")
     c2.metric("LBMS 避險策略 累積報酬", f"{(cum_strat.iloc[-1]-1)*100:.1f}%")
     c3.metric("B&H 最大回撤 (MDD)", f"{mdd_bh*100:.1f}%", delta_color="inverse")
-    c4.metric("LBMS 策略最大回撤 (MDD)", f"{mdd_strat*100:.1f}%", f"改善 {abs(mdd_bh-mdd_strat)*1
+    c4.metric("LBMS 策略最大回撤 (MDD)", f"{mdd_strat*100:.1f}%", f"改善 {abs(mdd_bh-mdd_strat)*100:.1f}%", delta_color="normal")
+    
+    st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
+    fig_backtest = go.Figure()
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
+    fig_backtest.update_layout(template="plotly_dark

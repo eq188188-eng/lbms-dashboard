@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 import os
+import sys
 import traceback
 
 st.set_page_config(layout="wide")
@@ -157,5 +158,11 @@ try:
         else: st.caption("此配置下未觸發交易。")
 
 except Exception as e:
-    st.error("🚨 程式執行發生例外錯誤，詳細 Traceback 如下：")
+    exc_type, exc_obj, exc_tb = sys.exc_info()
+    if exc_tb:
+        line_no = exc_tb.tb_lineno
+        st.error(f"🚨 程式在第 **{line_no}** 行發生錯誤：`{type(e).__name__}: {e}`")
+    else:
+        st.error(f"🚨 發生例外錯誤：`{e}`")
+    
     st.code(traceback.format_exc(), language="python")

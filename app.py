@@ -14,8 +14,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (一鍵最佳化旗艦版)")
-st.caption("結合 B浪警戒、VIX 恐慌、信用利差、多維均線（MA20/60/240）與一鍵最佳化參數搜尋。")
+st.title("🛡️ LBMS 自動化流動性與泡沫預警系統 (精準低接版)")
+st.caption("減碼純看流動性危機（B浪、歷史波動、信用利差、VIX），加碼則結合 IV/VIX 恐慌解除與多維均線（MA20/60/240）支撐。")
 
 # ---------------------------------------------------------
 # 2. 數據抓取與預處理
@@ -72,13 +72,14 @@ vix_mavg = vix_close.rolling(60).mean()
 cond_vix = (vix_close > vix_mavg * 1.2) | (vix_close > 25.0)
 
 # ---------------------------------------------------------
-# 3. 回測計算與加碼點判定核心函數
+# 3. 回測計算核心函數 (減碼不看MA，加碼結合IV/VIX與MA支撐)
 # ---------------------------------------------------------
 def run_backtest(df, b_min, b_max, v_quant):
     vol_thresh = df['Vol_20d'].expanding().quantile(v_quant)
     cond_b = (df['ATH_Ratio'] >= b_min) & (df['ATH_Ratio'] <= b_max)
     cond_vol = df['Vol_20d'] > vol_thresh
     
+    # 風險評分（用於減碼/倉位控制：不看 MA）
     score = (
         cond_b.astype(int) + 
         cond_vol.astype(int) + 
@@ -87,8 +88,14 @@ def run_backtest(df, b_min, b_max, v_quant):
     )
     
     prev_score = score.shift(1).fillna(0)
-    add_signal = (prev_score >= 1) & (score == 0) & (df['Close'] < df['MA20'] * 0.98)
     
+    # 加碼條件：流動性危機解除 (score == 0)，且 VIX 降溫，且價格位於三條均線（MA20/MA60/MA240）附近或下方安全區
+    vix_cooling = vix_close.loc[df.index] < vix_mavg.loc[df.index]
+    price_near_support = (df['Close'] < df['MA20']) | (df['Close'] < df['MA60']) | (df['Close'] < df['MA240'] * 1.05)
+    
+    add_signal = (prev_score >= 1) & (score == 0) & vix_cooling & price_near_support
+    
+    # 動態倉位控制
     position = np.where(score >= 3, 0.0, np.where(score == 2, 0.3, np.where(score == 1, 0.7, 1.0)))
     pos_series = pd.Series(position, index=df.index).shift(1).fillna(1.0)
     
@@ -177,14 +184,8 @@ with tab1:
     st.divider()
 
     if is_add_today:
-        st.info("🔵 **當前訊號：拉回低接加碼點！ (Low-Risk Re-entry)**\n\n流動性危機解除且價格拉回至月線（MA20）下方具備安全邊際，建議分批低接加碼。")
+        st.info("🔵 **當前訊號：VIX降溫與均線支撐加碼點！ (IV/VIX & MA Re-entry)**\n\n恐慌與流動性危機解除，且價格回測至均線支撐帶，建議分批低接加碼。")
     elif trigger_count == 0:
-        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n各項泡沫、波動與流動性指標正常，可維持原持倉。")
+        st.success("🟢 **當前燈號：綠燈 (系統安全)**\n\n各項流動性與泡沫指標正常，可維持原持倉。")
     elif trigger_count == 1:
-        st.warning("🟡 **當前燈號：黃燈 (高度警戒)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 停止開槓桿，提高防備。")
-    elif trigger_count == 2:
-        st.error("🟠 **當前燈號：橘燈 (逃生區/減碼)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 現貨減碼 50%，清空槓桿部位。")
-    else:
-        st.error("🔴 **當前燈號：紅燈 (流動性危機/極限離場)**\n\n**觸發項目：** " + "；".join(triggers) + "\n\n**建議動作：** 執行無條件清倉 (Market Sell) 並轉入現金避險。")
-
-    st.subheader(f"📊 {target_symbol} 近期價格走勢與 MA20
+        st.warning("🟡 **當前燈號：黃燈 (

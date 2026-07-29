@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import streamlit as st  # 👈 務必確保這行在檔案最頂端第一組匯入中
+import streamlit as st  
 import os
 
 # 基本網頁排版設定
@@ -28,18 +28,25 @@ ndfi_sell_trigger = st.sidebar.slider("NDFI 突破此數值 (市場過熱)", min
 pcr_sell_trigger = st.sidebar.slider("5日 P/C Ratio 跌破此數值 (散戶瘋狂)", min_value=0.5, max_value=0.7, value=0.6, step=0.05)
 
 # ==============================================================================
-# 2. 安全讀取本地 CSV 檔案 (帶防錯提示與防呆檢查)
+# 2. 安全讀取本地 CSV 檔案 (增強欄位防錯與清洗)
 # ==============================================================================
 csv_filename = "data.csv"
 
 if not os.path.exists(csv_filename):
     st.error(f"❌ 找不到數據檔案！請確認您的 GitHub 專案根目錄下已放置名為 `{csv_filename}` 的檔案。")
-    st.info("💡 您的 CSV 欄位名稱應包含: `Date`, `TAIEX`, `00631L`, `NDFI`, `PCR_5MA`")
     st.stop()
 
 @st.cache_data
 def load_local_data():
     raw_df = pd.read_csv(csv_filename)
+    
+    # 清洗欄位名稱的空白字元
+    raw_df.columns = raw_df.columns.str.strip()
+    
+    if 'Date' not in raw_df.columns:
+        st.error("❌ CSV 檔案中找不到 `Date` 欄位！")
+        return None
+
     raw_df['Date'] = pd.to_datetime(raw_df['Date'], format='mixed', errors='coerce')
     raw_df = raw_df.dropna(subset=['Date'])
     
@@ -48,9 +55,14 @@ def load_local_data():
         
     raw_df = raw_df.sort_values('Date').set_index('Date')
     
-    for col in ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']:
+    # 強制將重要欄位轉為數字
+    target_cols = ['TAIEX', '00631L', 'NDFI', 'PCR_5MA']
+    for col in target_cols:
         if col in raw_df.columns:
             raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce')
+        else:
+            st.error(f"❌ CSV 檔案中缺少必要欄位: `{col}`")
+            return None
             
     raw_df = raw_df.ffill().bfill()
     
@@ -61,15 +73,19 @@ def load_local_data():
 df = load_local_data()
 
 if df is None or df.empty:
-    st.error("❌ 載入的資料集為空或格式錯誤！請檢查您的 `data.csv` 檔案內容與欄位名稱。")
+    st.error("❌ 載入的資料集為空或格式錯誤！請檢查您的 `data.csv` 欄位與內容。")
     st.stop()
 
-# 計算回測總年數，用於 CAGR 公式
+# 顯示前端偵錯資訊，讓使用者一眼看出資料有沒有抓到 00631L
+with st.expander("🔍 點擊展開檢視已載入的資料摘要與欄位確認"):
+    st.write(f"資料筆數總計: {len(df)} 筆")
+    st.write(df[['TAIEX', '00631L', 'NDFI', 'PCR_5MA']].tail(3))
+
 total_days = (df.index[-1] - df.index[0]).days
 years = total_days / 365.25 if total_days > 0 else 1.0
 
 # ==============================================================================
-# 3. 雙策略動態回測引擎 (純陣列運算)
+# 3. 雙策略動態回測引擎
 # ==============================================================================
 def run_local_backtest(ma_column):
     cash = float(initial_capital)
@@ -93,34 +109,38 @@ def run_local_backtest(ma_column):
         c_ndfi = float(ndfi_vals[i])
         c_pcr = float(pcr_vals[i])
         
-        current_portfolio_value = (etf_shares * c_etf) + cash
-        
+        # 狀況 A：持有部位時（均線防守 或 貪婪平倉）
         if in_position:
-            if c_taiex < c_ma:
+            if c_taiex < c_ma: # 1. 跌破防守均線
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🚨 跌破 {ma_column}，全數強制清倉避險！")
-            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger:
+            elif c_ndfi > ndfi_sell_trigger or c_pcr < pcr_sell_trigger: # 2. 過熱出場
                 cash += etf_shares * c_etf * (1.0 - fee_rate - tax_rate)
                 etf_shares = 0.0
                 in_position = False
                 logs.append(f"{c_date.strftime('%Y-%m-%d')} | 💰 市場轉為貪婪，全數獲利平倉！")
+                
+        # 狀況 B：空倉時（大盤在均線之上 + 恐懼抄底）
         else:
             if c_taiex >= c_ma:
                 if c_ndfi < ndfi_buy_trigger and c_pcr > pcr_buy_trigger:
-                    buy_budget = current_portfolio_value * 0.50
+                    current_total = (etf_shares * c_etf) + cash
+                    buy_budget = current_total * 0.50 # 50% 資金進場
                     etf_shares = buy_budget / (c_etf * (1.0 + fee_rate))
-                    cash = current_portfolio_value - (etf_shares * c_etf)
+                    cash = current_total - (etf_shares * c_etf)
                     in_position = True
                     logs.append(f"{c_date.strftime('%Y-%m-%d')} | 🎯 觸發極度恐懼抄底，50% 資金進場！")
                     
-        portfolio_values.append((etf_shares * c_etf) + cash)
+        # 每日計算總資產價值
+        current_portfolio_value = (etf_shares * c_etf) + cash
+        portfolio_values.append(current_portfolio_value)
         
     return portfolio_values, logs
 
 # ==============================================================================
-# 4. 績效指標計算功能 (CAGR 與 MDD)
+# 4. 績效指標計算功能
 # ==============================================================================
 def calculate_metrics(portfolio_values):
     p_series = pd.Series(portfolio_values)

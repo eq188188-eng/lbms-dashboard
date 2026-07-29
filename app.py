@@ -143,4 +143,4 @@ with tab1:
     st.divider()
 
     if is_add_today:
-        st.info("🔵 **當前訊號：籌碼危機解除與均
+        st.info("🔵 **當前訊號：籌碼危機

@@ -220,3 +220,7 @@ with tab2:
         st.dataframe(add_df[['Close', 'MA20', 'ATH%', '波動率%']].sort_index(ascending=False), use_container_width=True)
     else:
         st.info("歷史區間內未出現加碼訊號。")
+        # 計算 20、60、240 日均線
+df_t['MA20'] = df_t['Close'].rolling(window=20).mean()
+df_t['MA60'] = df_t['Close'].rolling(window=60).mean()
+df_t['MA240'] = df_t['Close'].rolling(window=240).mean()

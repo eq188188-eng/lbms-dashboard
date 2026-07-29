@@ -54,33 +54,27 @@ df_t['MA60'] = df_t['Close'].rolling(window=60).mean()
 df_t['MA240'] = df_t['Close'].rolling(window=240).mean()
 
 # ---------------------------------------------------------
-# 3. 模擬台股籌碼與融資指標 (串接真實 API 前的架構模擬)
-# 註：實戰中可接入證交所/期交所 API 或 CMoney/fugle 數據
+# 3. 模擬台股籌碼與融資指標
 # ---------------------------------------------------------
 np.random.seed(42)
 n_rows = len(df_t)
 
-# 模擬三大法人賣超狀態 (當大盤重挫或波動大時法人傾向賣超)
 df_t['Institutional_Sell'] = (df_t['Returns'].rolling(5).sum() < -0.05).astype(int)
 
-# 模擬融資維持率 (當指數跌破MA60時融資維持率下降逼近150%警戒線)
 base_maint_ratio = 165 - (df_t['Close'] / df_t['MA60'] - 1) * 50
 df_t['Margin_Maintenance_Ratio'] = np.clip(base_maint_ratio + np.random.normal(0, 3, n_rows), 130, 190)
-cond_margin_danger = df_t['Margin_Maintenance_Ratio'] < 152  # 融資斷頭警戒
+cond_margin_danger = df_t['Margin_Maintenance_Ratio'] < 152
 
-# 模擬期貨大台當量淨額 (大台 + 小台/4 + 微台/20)
 df_t['Futures_Net_Equivalent'] = np.random.normal(0, 5000, n_rows) - (df_t['Returns'].rolling(10).sum() * 20000)
 cond_futures_bearish = df_t['Futures_Net_Equivalent'] < -4000
 
-# 模擬選擇權 Put/Call Ratio 與 散戶多空比 (散戶在大跌時短線過度看空或過度歐奈爾式融資抄底)
 df_t['PCR'] = np.clip(110 + (df_t['Returns'].rolling(5).mean() * 300) + np.random.normal(0, 10, n_rows), 70, 160)
 cond_pcr_extreme = (df_t['PCR'] < 85) | (df_t['PCR'] > 145)
 
 # ---------------------------------------------------------
-# 4. 回測核心函數 (結合籌碼與均線防守)
+# 4. 回測核心函數
 # ---------------------------------------------------------
 def run_backtest(df):
-    # 風險評分（滿分 4 分）：法人賣超、融資維持率危機、期貨淨額偏空、選擇權PCR極端
     score = (
         df['Institutional_Sell'].astype(int) + 
         cond_margin_danger.astype(int) + 
@@ -89,11 +83,54 @@ def run_backtest(df):
     )
     
     prev_score = score.shift(1).fillna(0)
-    
-    # 加碼條件：危機解除 (score == 0)，且價格回測至三條均線（MA20/60/240）支撐區
     price_near_support = (df['Close'] < df['MA20']) | (df['Close'] < df['MA60']) | (df['Close'] < df['MA240'] * 1.05)
     add_signal = (prev_score >= 1) & (score == 0) & price_near_support
     
-    # 動態倉位控制 (0分滿倉, 1分7成, 2分3成, 3分以上清倉)
     position = np.where(score >= 3, 0.0, np.where(score == 2, 0.3, np.where(score == 1, 0.7, 1.0)))
-    pos_series = pd.Series(position, index=df.index).shift
+    pos_series = pd.Series(position, index=df.index).shift(1).fillna(1.0)
+    
+    strat_ret = df['Returns'] * pos_series
+    cum_strat = (1 + strat_ret.fillna(0)).cumprod()
+    mdd = ((cum_strat / cum_strat.cummax()) - 1).min()
+    total_ret = cum_strat.iloc[-1] - 1
+    return total_ret, mdd, score, add_signal
+
+total_ret, mdd_strat, signal_score, add_signals = run_backtest(df_t)
+df_t['Signal'] = signal_score
+df_t['Add_Signal'] = add_signals
+
+# ---------------------------------------------------------
+# 5. 頁面呈現
+# ---------------------------------------------------------
+tab1, tab2 = st.tabs(["📊 台股籌碼即時儀表板", "📈 歷史回測與訊號分析"])
+
+with tab1:
+    curr_price = float(df_t['Close'].iloc[-1])
+    curr_ath = float(df_t['ATH'].iloc[-1])
+    curr_maint = float(df_t['Margin_Maintenance_Ratio'].iloc[-1])
+    curr_futures = float(df_t['Futures_Net_Equivalent'].iloc[-1])
+    curr_pcr = float(df_t['PCR'].iloc[-1])
+    is_add_today = bool(df_t['Add_Signal'].iloc[-1])
+    
+    triggers = []
+    if df_t['Institutional_Sell'].iloc[-1] == 1:
+        triggers.append("三大法人近期呈現明顯賣超")
+    if curr_maint < 152:
+        triggers.append(f"融資維持率偏低逼近斷頭區 (當前: {curr_maint:.1f}%)")
+    if curr_futures < -4000:
+        triggers.append(f"期貨法人大台當量淨額大幅偏空 ({curr_futures:.0f} 口)")
+    if curr_pcr < 85 or curr_pcr > 145:
+        triggers.append(f"選擇權 Put/Call Ratio 處於極端數值 ({curr_pcr:.1f}%)")
+
+    trigger_count = len(triggers)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("當前價格", f"${curr_price:.2f}", f"歷史高點: ${curr_ath:.2f}")
+    c2.metric("融資維持率 Proxy", f"{curr_maint:.1f}%", "警戒線: 152%", delta_color="inverse" if curr_maint < 152 else "normal")
+    c3.metric("期貨法人淨額當量", f"{curr_futures:.0f} 口", delta_color="inverse" if curr_futures < 0 else "normal")
+    c4.metric("選擇權 PCR", f"{curr_pcr:.1f}%", delta_color="off")
+
+    st.divider()
+
+    if is_add_today:
+        st.info("🔵 **當前訊號：籌碼危機解除與均線支撐加碼

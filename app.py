@@ -220,6 +220,4 @@ with tab2:
     
     st.subheader("📉 累積權益曲線 (Strategy Equity Curve vs. Buy & Hold)")
     fig_backtest = go.Figure()
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_symbol})", line=dict(color='gray', width=1.5)))
-    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_strat, name="LBMS 風控避險策略", line=dict(color='green', width=2)))
-    fig_backtest.update_layout(template="plotly_dark
+    fig_backtest.add_trace(go.Scatter(x=df_clean.index, y=cum_bh, name=f"買入持有 ({target_
